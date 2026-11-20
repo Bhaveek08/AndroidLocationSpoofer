@@ -152,7 +152,7 @@ class MainActivity : Activity() {
         HttpRequestUtil.setOkHttpClient(
             OkHttpClient.Builder().addInterceptor { chain ->
                 chain.proceed(chain.request().newBuilder()
-                    .header("User-Agent", "GeoShift/0.4.1 (+https://github.com/Bhaveek08/AndroidLocationSpoofer)")
+                    .header("User-Agent", "GeoShift/0.4.2 (+https://github.com/Bhaveek08/AndroidLocationSpoofer)")
                     .build())
             }.build()
         )
