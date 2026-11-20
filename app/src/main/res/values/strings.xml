@@ -1,0 +1,5 @@
+<resources>
+    <string name="status_mock_fix_title">Android returned a mock fix</string>
+    <string name="status_mock_fix_detail">%1$s\nLast verified: %2$s</string>
+    <string name="status_mock_location_failed">Mock location failed</string>
+</resources>
