@@ -8,6 +8,7 @@ import android.os.Build
 import android.os.SystemClock
 import android.view.MotionEvent
 import android.view.View
+import android.view.ViewGroup
 import android.widget.EditText
 import org.json.JSONArray
 import org.json.JSONObject
@@ -22,6 +23,41 @@ import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class MockLocationRoundTripTest {
+    @Test
+    fun spoofControlIsOneToggleWithClearOnAndOffStates() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val context = instrumentation.targetContext
+        val launcher = context.packageManager.getLaunchIntentForPackage(context.packageName)
+            ?: error("Location Lab launcher activity was not found.")
+        val activity = instrumentation.startActivitySync(launcher.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        val root = activity.window.decorView
+        val toggle = root.findViewWithTag("spoof-toggle") as? android.widget.TextView
+            ?: error("The single spoof toggle was not shown.")
+        val prefs = context.getSharedPreferences(MockLocationService.PREFS, Context.MODE_PRIVATE)
+        val oldState = prefs.getString(MockLocationService.KEY_STATE, null)
+        try {
+            assertEquals("Start spoofing", toggle.contentDescription)
+            assertEquals("The control should fill the action row.", ViewGroup.LayoutParams.MATCH_PARENT, toggle.layoutParams.width)
+            assertTrue("There should be no separate stop control.", root.findViewWithTag<View>("stop-mock") == null)
+            instrumentation.runOnMainSync {
+                prefs.edit().putString(MockLocationService.KEY_STATE, "active").commit()
+                activity.javaClass.getDeclaredMethod("refreshStatus").apply { isAccessible = true }.invoke(activity)
+            }
+            assertEquals("Stop spoofing", toggle.contentDescription)
+            assertTrue("Active state should be explicit on the button.", toggle.text.toString().contains("Stop spoofing"))
+            instrumentation.runOnMainSync {
+                prefs.edit().putString(MockLocationService.KEY_STATE, "stopped").commit()
+                activity.javaClass.getDeclaredMethod("refreshStatus").apply { isAccessible = true }.invoke(activity)
+            }
+            assertEquals("Start spoofing", toggle.contentDescription)
+        } finally {
+            val editor = prefs.edit()
+            if (oldState == null) editor.remove(MockLocationService.KEY_STATE) else editor.putString(MockLocationService.KEY_STATE, oldState)
+            editor.commit()
+            instrumentation.runOnMainSync { activity.finish() }
+        }
+    }
+
     @Test
     fun savedPlacesAreVisibleAndSelectTheirCoordinates() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()

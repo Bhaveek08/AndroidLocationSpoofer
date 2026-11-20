@@ -77,7 +77,6 @@ class MainActivity : Activity() {
     private lateinit var statusDetailView: TextView
     private lateinit var favoritesButton: TextView
     private lateinit var startButton: TextView
-    private lateinit var stopButton: TextView
     private lateinit var centerButton: TextView
     private lateinit var detailsGroup: LinearLayout
     private lateinit var collapseToggle: TextView
@@ -392,15 +391,15 @@ class MainActivity : Activity() {
         sheet.addView(detailsGroup, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(10) })
 
         val actions = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-        startButton = actionChip("Start mock location", 0xFF176B5B.toInt(), Color.WHITE) { startSession() }.apply {
+        startButton = actionChip("▶   Start spoofing", 0xFF176B5B.toInt(), Color.WHITE) { toggleSpoofing() }.apply {
             textSize = 15f
-            tag = "start-mock"
+            tag = "spoof-toggle"
+            contentDescription = "Start spoofing"
             background = GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT, intArrayOf(0xFF126557.toInt(), 0xFF1B8A70.toInt())).apply { cornerRadius = dp(16).toFloat() }
-            elevation = dp(3).toFloat()
+            elevation = dp(4).toFloat()
+            minHeight = dp(58)
         }
-        stopButton = actionChip("Stop", 0xFFF2E9E8.toInt(), 0xFF8B3D35.toInt()) { stopSession() }.apply { tag = "stop-mock" }
-        actions.addView(startButton, LinearLayout.LayoutParams(0, dp(52), 1f))
-        actions.addView(stopButton, LinearLayout.LayoutParams(dp(78), dp(52)).apply { marginStart = dp(8) })
+        actions.addView(startButton, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(58)))
         sheet.addView(actions, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(10) })
         root.addView(sheet, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM))
 
@@ -875,6 +874,7 @@ class MainActivity : Activity() {
         val prefs = getSharedPreferences(MockLocationService.PREFS, Context.MODE_PRIVATE)
         when (prefs.getString(MockLocationService.KEY_STATE, "stopped")) {
             "active" -> {
+                setSpoofButton("active")
                 if (::mapStatusChip.isInitialized) mapStatusChip.text = "MOCK ACTIVE"
                 statusView.setText(R.string.status_mock_fix_title)
                 val timestamp = prefs.getLong(MockLocationService.KEY_UPDATED, 0L)
@@ -887,16 +887,19 @@ class MainActivity : Activity() {
                 statusView.setTextColor(0xFF176B5B.toInt())
             }
             "error" -> {
+                setSpoofButton("stopped")
                 if (::mapStatusChip.isInitialized) mapStatusChip.text = "SETUP NEEDED"
                 statusView.setText(R.string.status_mock_location_failed)
                 statusDetailView.text = prefs.getString(MockLocationService.KEY_DETAIL, "Check Developer options and permissions.")
                 statusView.setTextColor(0xFFB3261E.toInt())
             }
             "starting" -> {
+                setSpoofButton("starting")
                 if (::mapStatusChip.isInitialized) mapStatusChip.text = "STARTING…"
                 showStatus("Starting…", prefs.getString(MockLocationService.KEY_DETAIL, "Setting up providers.") ?: "Setting up providers.")
             }
             else -> {
+                setSpoofButton("stopped")
                 val ready = isSelectedMockApp()
                 if (::mapStatusChip.isInitialized && !locationLookupActive) {
                     mapStatusChip.text = when {
@@ -912,6 +915,33 @@ class MainActivity : Activity() {
         }
         handler.removeCallbacks(statusPoll)
         if (resumed) handler.postDelayed(statusPoll, 1_000L)
+    }
+
+    private fun toggleSpoofing() {
+        val state = getSharedPreferences(MockLocationService.PREFS, Context.MODE_PRIVATE)
+            .getString(MockLocationService.KEY_STATE, "stopped")
+        if (state == "active" || state == "starting") stopSession() else startSession()
+    }
+
+    private fun setSpoofButton(state: String) {
+        if (!::startButton.isInitialized) return
+        when (state) {
+            "active" -> {
+                startButton.text = "■   Stop spoofing"
+                startButton.contentDescription = "Stop spoofing"
+                startButton.background = GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT, intArrayOf(0xFFB8443C.toInt(), 0xFFD95D50.toInt())).apply { cornerRadius = dp(16).toFloat() }
+            }
+            "starting" -> {
+                startButton.text = "◌   Starting…  ·  Tap to stop"
+                startButton.contentDescription = "Stop starting mock location"
+                startButton.background = GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT, intArrayOf(0xFF866529.toInt(), 0xFFAA8538.toInt())).apply { cornerRadius = dp(16).toFloat() }
+            }
+            else -> {
+                startButton.text = "▶   Start spoofing"
+                startButton.contentDescription = "Start spoofing"
+                startButton.background = GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT, intArrayOf(0xFF126557.toInt(), 0xFF1B8A70.toInt())).apply { cornerRadius = dp(16).toFloat() }
+            }
+        }
     }
 
     private fun showStatus(title: String, detail: String) {
