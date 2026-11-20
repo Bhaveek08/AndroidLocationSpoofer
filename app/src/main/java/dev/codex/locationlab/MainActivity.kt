@@ -107,7 +107,7 @@ class MainActivity : Activity() {
         HttpRequestUtil.setOkHttpClient(
             OkHttpClient.Builder().addInterceptor { chain ->
                 chain.proceed(chain.request().newBuilder()
-                    .header("User-Agent", "LocationLab/0.2.0 (+https://github.com/Bhaveek08/android-location-lab)")
+                    .header("User-Agent", "LocationLab/0.2.0 (+https://github.com/Bhaveek08/AndroidLocationSpoofer)")
                     .build())
             }.build()
         )
