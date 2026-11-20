@@ -110,12 +110,15 @@ class MockLocationRoundTripTest {
     @Test
     fun nativeMapLoadsAndTapSelectsAValidCoordinate() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
+        wakeDevice(instrumentation)
         val context = instrumentation.targetContext
         instrumentation.uiAutomation.grantRuntimePermission(context.packageName, Manifest.permission.ACCESS_FINE_LOCATION)
         val launcher = context.packageManager.getLaunchIntentForPackage(context.packageName)
             ?: error("GeoShift launcher activity was not found.")
         val activity = instrumentation.startActivitySync(launcher.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
         val root = activity.window.decorView
+        val appRoot = root.findViewWithTag<View>("app-root")
+            ?: error("The themed app surface was not added to the screen.")
         val map = root.findViewWithTag("location-map") as? View
             ?: error("The interactive map was not added to the screen.")
         val latitude = root.findViewWithTag("latitude-input") as? EditText
@@ -129,11 +132,13 @@ class MockLocationRoundTripTest {
         val detailsGroup = root.findViewWithTag("extra-location-controls") as? View
             ?: error("The extra location controls were not added to the screen.")
         try {
+            val rootColor = (appRoot.background as? android.graphics.drawable.ColorDrawable)?.color
+            assertEquals("The app surface should use the premium dark palette.", 0xFF0B1114.toInt(), rootColor)
             val readyDeadline = SystemClock.elapsedRealtime() + 30_000L
             while (SystemClock.elapsedRealtime() < readyDeadline &&
                 map.contentDescription?.toString()?.contains("ready", ignoreCase = true) != true
             ) Thread.sleep(250L)
-            assertTrue("OpenStreetMap style and tile map should finish loading.",
+            assertTrue("The OpenFreeMap dark vector style should finish loading.",
                 map.contentDescription?.toString()?.contains("ready", ignoreCase = true) == true)
             assertEquals("The default map panel should stay compact.", View.GONE, detailsGroup.visibility)
             instrumentation.runOnMainSync { detailsToggle.performClick() }
@@ -176,6 +181,105 @@ class MockLocationRoundTripTest {
         } finally {
             instrumentation.runOnMainSync { activity.finish() }
         }
+    }
+
+    @Test
+    fun mapControlsStayResponsiveAcrossOneHundredInteractions() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        wakeDevice(instrumentation)
+        val context = instrumentation.targetContext
+        instrumentation.uiAutomation.grantRuntimePermission(context.packageName, Manifest.permission.ACCESS_FINE_LOCATION)
+        val launcher = context.packageManager.getLaunchIntentForPackage(context.packageName)
+            ?: error("GeoShift launcher activity was not found.")
+        val activity = instrumentation.startActivitySync(launcher.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        val root = activity.window.decorView
+        val mapView = root.findViewWithTag("location-map") as? View
+            ?: error("The interactive map was not added to the screen.")
+        val detailsToggle = root.findViewWithTag("details-toggle") as? View
+            ?: error("The extra-controls toggle was not added to the screen.")
+        val detailsGroup = root.findViewWithTag("extra-location-controls") as? View
+            ?: error("The extra-controls panel was not added to the screen.")
+        val zoomIn = root.findViewWithTag("zoom-in") as? View
+            ?: error("The zoom-in control was not added to the screen.")
+        val zoomOut = root.findViewWithTag("zoom-out") as? View
+            ?: error("The zoom-out control was not added to the screen.")
+        try {
+            val readyDeadline = SystemClock.elapsedRealtime() + 45_000L
+            while (SystemClock.elapsedRealtime() < readyDeadline &&
+                mapView.contentDescription?.toString()?.contains("ready", ignoreCase = true) != true
+            ) Thread.sleep(200L)
+            assertTrue("The map should be visibly ready before stress interactions.",
+                mapView.contentDescription?.toString()?.contains("ready", ignoreCase = true) == true)
+            val density = activity.resources.displayMetrics.density
+            listOf(detailsToggle, zoomIn, zoomOut).forEach { control ->
+                assertTrue("Every map control should be visible, clickable, and at least 48dp high.",
+                    control.isShown && control.isClickable && control.height >= 48f * density)
+            }
+
+            val mapField = activity.javaClass.getDeclaredField("map").apply { isAccessible = true }
+            val map = mapField.get(activity) as org.maplibre.android.maps.MapLibreMap
+            var interactions = 0
+            repeat(25) { cycle ->
+                instrumentation.runOnMainSync {
+                    assertTrue("Expand should accept a tap in cycle $cycle.", detailsToggle.performClick())
+                    interactions++
+                    assertEquals("Expanded controls should be visible in cycle $cycle.", View.VISIBLE, detailsGroup.visibility)
+                    assertTrue("Collapse should accept a tap in cycle $cycle.", detailsToggle.performClick())
+                    interactions++
+                    assertEquals("Expanded controls should collapse in cycle $cycle.", View.GONE, detailsGroup.visibility)
+                }
+                val beforeIn = map.cameraPosition.zoom
+                instrumentation.runOnMainSync { assertTrue("Zoom in should accept a tap in cycle $cycle.", zoomIn.performClick()) }
+                interactions++
+                waitForZoom(map, beforeIn, zoomingIn = true, cycle = cycle)
+                val afterIn = map.cameraPosition.zoom
+                instrumentation.runOnMainSync { assertTrue("Zoom out should accept a tap in cycle $cycle.", zoomOut.performClick()) }
+                interactions++
+                waitForZoom(map, afterIn, zoomingIn = false, cycle = cycle)
+            }
+            assertEquals("The stress pass should verify exactly 100 real UI control activations.", 100, interactions)
+            val screenshot = instrumentation.uiAutomation.takeScreenshot()
+            assertTrue("The app should still render a frame after the repeated interactions.", screenshot != null)
+            screenshot?.recycle()
+        } finally {
+            instrumentation.runOnMainSync { activity.finish() }
+        }
+    }
+
+    @Test
+    fun savedPlaceBackupRoundTripsAndExcludesCurrentLocationHistory() {
+        val source = SavedPlacesBackup(
+            home = BackupPlace("Home", 12.9716, 77.5946),
+            favorites = listOf(BackupPlace("Studio", 13.0358, 77.5970), BackupPlace("Park", 12.9352, 77.6245))
+        )
+        val json = SavedPlacesBackupCodec.encode(source)
+        val restored = SavedPlacesBackupCodec.decode(json)
+        assertEquals(source, restored)
+        assertTrue("The export should only contain deliberately saved places.",
+            !json.contains("last_real") && !json.contains("real_location"))
+        assertTrue("Invalid coordinates should be rejected.", runCatching {
+            SavedPlacesBackupCodec.decode("""{"product":"GeoShift","schemaVersion":1,"home":{"name":"Bad","latitude":91,"longitude":0},"favorites":[]}""")
+        }.isFailure)
+    }
+
+    private fun wakeDevice(instrumentation: android.app.Instrumentation) {
+        instrumentation.uiAutomation.executeShellCommand("input keyevent KEYCODE_WAKEUP").close()
+    }
+
+    private fun waitForZoom(
+        map: org.maplibre.android.maps.MapLibreMap,
+        before: Double,
+        zoomingIn: Boolean,
+        cycle: Int
+    ) {
+        val deadline = SystemClock.elapsedRealtime() + 1_500L
+        while (SystemClock.elapsedRealtime() < deadline) {
+            val zoom = map.cameraPosition.zoom
+            if (if (zoomingIn) zoom > before else zoom < before) return
+            Thread.sleep(40L)
+        }
+        assertTrue("Zoom ${if (zoomingIn) "in" else "out"} should change the camera in cycle $cycle.",
+            if (zoomingIn) map.cameraPosition.zoom > before else map.cameraPosition.zoom < before)
     }
 
     @Test
