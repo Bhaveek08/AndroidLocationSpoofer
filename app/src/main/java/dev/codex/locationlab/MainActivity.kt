@@ -82,6 +82,7 @@ class MainActivity : Activity() {
     private lateinit var collapseToggle: TextView
     private lateinit var locationSheet: LinearLayout
     private lateinit var placesStrip: LinearLayout
+    private lateinit var savedPlacesTitle: TextView
     private lateinit var mapStatusChip: TextView
     private lateinit var mapAttribution: TextView
     private lateinit var mapZoomControls: LinearLayout
@@ -122,7 +123,7 @@ class MainActivity : Activity() {
         HttpRequestUtil.setOkHttpClient(
             OkHttpClient.Builder().addInterceptor { chain ->
                 chain.proceed(chain.request().newBuilder()
-                    .header("User-Agent", "LocationLab/0.3.0 (+https://github.com/Bhaveek08/AndroidLocationSpoofer)")
+                    .header("User-Agent", "LocationLab/0.3.2 (+https://github.com/Bhaveek08/AndroidLocationSpoofer)")
                     .build())
             }.build()
         )
@@ -340,7 +341,8 @@ class MainActivity : Activity() {
         sheet.addView(titleRow)
 
         val placesHeader = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-        placesHeader.addView(text("SAVED PLACES", 10f, 0xFF71817C.toInt(), bold = true), LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        savedPlacesTitle = text("SAVED PLACES", 10f, 0xFF71817C.toInt(), bold = true)
+        placesHeader.addView(savedPlacesTitle, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         placesHeader.addView(actionChip("＋ Save", 0xFFEAF3F0.toInt(), 0xFF176B5B.toInt()) { addFavorite() }, LinearLayout.LayoutParams(dp(86), dp(34)))
         sheet.addView(placesHeader, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(11) })
 
@@ -351,8 +353,8 @@ class MainActivity : Activity() {
             tag = "saved-places-scroll"
         }
         placesStrip = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; tag = "saved-places-strip" }
-        placesScroll.addView(placesStrip, ViewGroup.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(48)))
-        sheet.addView(placesScroll, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(48)).apply { topMargin = dp(3) })
+        placesScroll.addView(placesStrip, ViewGroup.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(58)))
+        sheet.addView(placesScroll, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(58)).apply { topMargin = dp(3) })
         refreshSavedPlacesStrip()
 
         val legend = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
@@ -974,7 +976,9 @@ class MainActivity : Activity() {
         includeFontPadding = false
         setTextColor(foregroundColor)
         setPadding(dp(8), dp(7), dp(8), dp(7))
-        background = rounded(backgroundColor, 14)
+        background = android.graphics.drawable.RippleDrawable(
+            android.content.res.ColorStateList.valueOf(0x332C7C69), rounded(backgroundColor, 14), null
+        )
         isClickable = true
         isFocusable = true
         setOnClickListener { performHapticFeedback(android.view.HapticFeedbackConstants.CONTEXT_CLICK); onClick() }
@@ -1060,14 +1064,15 @@ class MainActivity : Activity() {
         if (!::placesStrip.isInitialized) return
         placesStrip.removeAllViews()
         val prefs = getPreferences(Context.MODE_PRIVATE)
-        val items = mutableListOf<Pair<String, SavedPlace>>()
+        val items = mutableListOf<Pair<Boolean, SavedPlace>>()
         val homeLat = prefs.getString(KEY_HOME_LAT, null)?.toDoubleOrNull()
         val homeLon = prefs.getString(KEY_HOME_LON, null)?.toDoubleOrNull()
         if (homeLat != null && homeLon != null) {
             val homePoint = runCatching { GeoPoint.parse(homeLat.toString(), homeLon.toString()) }.getOrNull()
-            if (homePoint != null) items += "⌂  ${prefs.getString(KEY_HOME_LABEL, "Home") ?: "Home"}" to SavedPlace(prefs.getString(KEY_HOME_LABEL, "Home") ?: "Home", homePoint)
+            if (homePoint != null) items += true to SavedPlace(prefs.getString(KEY_HOME_LABEL, "Home") ?: "Home", homePoint)
         }
-        readFavorites().forEach { items += "●  ${it.name}" to it }
+        readFavorites().forEach { items += false to it }
+        if (::savedPlacesTitle.isInitialized) savedPlacesTitle.text = "SAVED PLACES  ·  ${items.size}"
         if (items.isEmpty()) {
             placesStrip.addView(text("Choose a point, then tap + Save", 12f, 0xFF7A8984.toInt()).apply {
                 gravity = Gravity.CENTER_VERTICAL
@@ -1075,23 +1080,34 @@ class MainActivity : Activity() {
             }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(42)))
             return
         }
-        items.forEach { (label, place) ->
-            val chip = TextView(this).apply {
-                text = label
+        items.forEach { (isHome, place) ->
+            val chip = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
                 val testableName = place.name.lowercase(Locale.ROOT).replace(Regex("[^a-z0-9]+"), "-").trim('-')
                 tag = "saved-place-$testableName"
-                contentDescription = "Use saved place ${place.name}"
-                textSize = 12f
-                maxLines = 1
-                maxWidth = dp(180)
-                ellipsize = android.text.TextUtils.TruncateAt.END
-                gravity = Gravity.CENTER
-                includeFontPadding = false
-                setTextColor(0xFF214B42.toInt())
-                setPadding(dp(13), dp(8), dp(13), dp(8))
-                background = rounded(Color.WHITE, 16, 0xFFDCE9E4.toInt())
+                contentDescription = "Use saved place ${place.name}, ${formatCoordinate(place.point.latitude)}, ${formatCoordinate(place.point.longitude)}"
+                setPadding(dp(10), dp(6), dp(13), dp(6))
+                val cardColor = if (isHome) 0xFFE8F4EF.toInt() else Color.WHITE
+                background = android.graphics.drawable.RippleDrawable(
+                    android.content.res.ColorStateList.valueOf(0x332C7C69),
+                    rounded(cardColor, 16, if (isHome) 0xFFBBD8CC.toInt() else 0xFFDCE9E4.toInt()), null
+                )
+                elevation = dp(1).toFloat()
                 isClickable = true
                 isFocusable = true
+                val icon = TextView(this@MainActivity).apply {
+                    text = if (isHome) "⌂" else "●"
+                    textSize = if (isHome) 21f else 13f
+                    gravity = Gravity.CENTER
+                    setTextColor(if (isHome) 0xFF126557.toInt() else 0xFF2473D4.toInt())
+                    background = rounded(if (isHome) 0xFFD5EAE1.toInt() else 0xFFE5EFFB.toInt(), 12)
+                }
+                addView(icon, LinearLayout.LayoutParams(dp(38), dp(38)))
+                val labels = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.VERTICAL }
+                labels.addView(text(place.name, 12f, 0xFF214B42.toInt(), bold = true).apply { maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END })
+                labels.addView(text("${formatCoordinate(place.point.latitude)}, ${formatCoordinate(place.point.longitude)}", 9f, 0xFF72817C.toInt()).apply { maxLines = 1 })
+                addView(labels, LinearLayout.LayoutParams(dp(112), ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginStart = dp(8) })
                 setOnClickListener {
                     addressInput.setText(place.name)
                     latitudeInput.setText(formatCoordinate(place.point.latitude))
@@ -1100,7 +1116,7 @@ class MainActivity : Activity() {
                     performHapticFeedback(android.view.HapticFeedbackConstants.CONTEXT_CLICK)
                 }
             }
-            placesStrip.addView(chip, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(42)).apply { marginEnd = dp(8) })
+            placesStrip.addView(chip, LinearLayout.LayoutParams(dp(186), dp(52)).apply { marginEnd = dp(8) })
         }
     }
 

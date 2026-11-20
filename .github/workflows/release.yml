@@ -24,7 +24,7 @@ jobs:
       - name: Install Android SDK packages
         run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
       - name: Verify and assemble release APK
-        run: ./gradlew testDebugUnitTest lintDebug assembleDebug
+        run: ./gradlew testDebugUnitTest lintDebug assembleDebug packageDebugAndroidTest
       - name: Publish APK on GitHub Releases
         env:
           GH_TOKEN: ${{ github.token }}
