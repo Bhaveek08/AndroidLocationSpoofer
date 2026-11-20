@@ -152,7 +152,7 @@ class MainActivity : Activity() {
         HttpRequestUtil.setOkHttpClient(
             OkHttpClient.Builder().addInterceptor { chain ->
                 chain.proceed(chain.request().newBuilder()
-                    .header("User-Agent", "GeoShift/0.4.0 (+https://github.com/Bhaveek08/AndroidLocationSpoofer)")
+                    .header("User-Agent", "GeoShift/0.4.1 (+https://github.com/Bhaveek08/AndroidLocationSpoofer)")
                     .build())
             }.build()
         )
@@ -326,10 +326,10 @@ class MainActivity : Activity() {
             gravity = Gravity.CENTER
             background = rounded(UiPalette.surface, 18, UiPalette.outline)
             elevation = dp(7).toFloat()
-            addView(iconControl(R.drawable.ic_add, "Zoom in") { map?.animateCamera(CameraUpdateFactory.zoomIn(), 280) }.apply { tag = "zoom-in"; minWidth = dp(50); minHeight = dp(50) })
+            addView(iconControl(R.drawable.ic_add, "Zoom in") { map?.animateCamera(CameraUpdateFactory.zoomIn(), 280) }.apply { tag = "zoom-in"; setMinimumWidth(dp(50)); setMinimumHeight(dp(50)) })
             val divider = View(this@MainActivity).apply { setBackgroundColor(UiPalette.outline) }
             addView(divider, LinearLayout.LayoutParams(dp(34), dp(1)))
-            addView(iconControl(R.drawable.ic_remove, "Zoom out") { map?.animateCamera(CameraUpdateFactory.zoomOut(), 280) }.apply { tag = "zoom-out"; minWidth = dp(50); minHeight = dp(50) })
+            addView(iconControl(R.drawable.ic_remove, "Zoom out") { map?.animateCamera(CameraUpdateFactory.zoomOut(), 280) }.apply { tag = "zoom-out"; setMinimumWidth(dp(50)); setMinimumHeight(dp(50)) })
         }
         val zoomParams = FrameLayout.LayoutParams(dp(52), dp(104), Gravity.TOP or Gravity.END).apply {
             topMargin = dp(142); marginEnd = dp(16)
@@ -1099,7 +1099,7 @@ class MainActivity : Activity() {
 
     private fun horizontal() = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
 
-    private fun actionChip(label: String, backgroundColor: Int, foregroundColor: Int, onClick: () -> Unit, iconResource: Int? = null) = TextView(this).apply {
+    private fun actionChip(label: String, backgroundColor: Int, foregroundColor: Int, iconResource: Int? = null, onClick: () -> Unit) = TextView(this).apply {
         text = label
         textSize = 13f
         gravity = Gravity.CENTER
@@ -1129,8 +1129,8 @@ class MainActivity : Activity() {
         scaleType = ImageView.ScaleType.CENTER
         setPadding(dp(13), dp(13), dp(13), dp(13))
         background = rippleSurface(ColorDrawable(Color.TRANSPARENT), 16)
-        minWidth = dp(48)
-        minHeight = dp(48)
+        setMinimumWidth(dp(48))
+        setMinimumHeight(dp(48))
         isClickable = true
         isFocusable = true
         setOnClickListener { performHapticFeedback(android.view.HapticFeedbackConstants.CONTEXT_CLICK); onClick() }
