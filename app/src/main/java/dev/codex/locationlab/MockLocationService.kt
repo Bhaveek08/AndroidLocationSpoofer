@@ -124,7 +124,7 @@ class MockLocationService : Service() {
         )
         return Notification.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_menu_mylocation)
-            .setContentTitle("Location Lab is active")
+            .setContentTitle("GeoShift is active")
             .setContentText("${target.latitude}, ${target.longitude}")
             .setContentIntent(openApp)
             .setOngoing(true)

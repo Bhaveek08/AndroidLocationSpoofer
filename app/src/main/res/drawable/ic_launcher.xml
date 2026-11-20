@@ -4,9 +4,15 @@
     android:viewportWidth="48"
     android:viewportHeight="48">
     <path
-        android:fillColor="#176B5B"
-        android:pathData="M24,2C14.6,2 7,9.6 7,19c0,12 17,27 17,27s17,-15 17,-27C41,9.6 33.4,2 24,2z" />
+        android:fillColor="#12363A"
+        android:pathData="M0,0h48v48h-48z" />
     <path
-        android:fillColor="#FFFFFF"
-        android:pathData="M24,11a8,8 0,1 0,0 16a8,8 0,1 0,0 -16z" />
+        android:fillColor="#16877B"
+        android:pathData="M24,4C14.6,4 7,11.6 7,21c0,12 17,23 17,23s17,-11 17,-23C41,11.6 33.4,4 24,4z" />
+    <path
+        android:fillColor="#D8F2E8"
+        android:pathData="M24,12a9,9 0,1 0,0 18a9,9 0,1 0,0 -18z" />
+    <path
+        android:fillColor="#12363A"
+        android:pathData="M24,16a5,5 0,1 0,0 10a5,5 0,1 0,0 -10z" />
 </vector>

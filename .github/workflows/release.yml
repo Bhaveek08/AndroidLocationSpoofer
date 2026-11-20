@@ -29,4 +29,4 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-        run: gh release create "$GITHUB_REF_NAME" app/build/outputs/apk/debug/app-debug.apk --title "Location Lab $GITHUB_REF_NAME" --generate-notes
+        run: gh release create "$GITHUB_REF_NAME" app/build/outputs/apk/debug/app-debug.apk --title "GeoShift $GITHUB_REF_NAME" --generate-notes

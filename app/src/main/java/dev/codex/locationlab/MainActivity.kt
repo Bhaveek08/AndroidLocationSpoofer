@@ -5,6 +5,7 @@ import android.app.Activity
 import android.app.AlertDialog
 import android.app.AppOpsManager
 import android.animation.LayoutTransition
+import android.animation.ValueAnimator
 import android.content.Context
 import android.content.Intent
 import android.location.Address
@@ -25,13 +26,19 @@ import android.graphics.Canvas
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.RippleDrawable
+import android.graphics.drawable.ColorDrawable
+import android.content.res.ColorStateList
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.view.animation.OvershootInterpolator
 import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.EditText
 import android.widget.FrameLayout
+import android.widget.ImageButton
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -48,12 +55,14 @@ import org.maplibre.android.style.layers.Property
 import org.maplibre.android.style.layers.SymbolLayer
 import org.maplibre.android.style.layers.PropertyFactory.circleColor
 import org.maplibre.android.style.layers.PropertyFactory.circleRadius
+import org.maplibre.android.style.layers.PropertyFactory.circleOpacity
 import org.maplibre.android.style.layers.PropertyFactory.circleStrokeColor
 import org.maplibre.android.style.layers.PropertyFactory.circleStrokeWidth
 import org.maplibre.android.style.layers.PropertyFactory.iconAllowOverlap
 import org.maplibre.android.style.layers.PropertyFactory.iconAnchor
 import org.maplibre.android.style.layers.PropertyFactory.iconIgnorePlacement
 import org.maplibre.android.style.layers.PropertyFactory.iconImage
+import org.maplibre.android.style.layers.PropertyFactory.iconSize
 import org.maplibre.android.style.sources.GeoJsonSource
 import org.maplibre.geojson.Feature
 import org.maplibre.geojson.FeatureCollection
@@ -67,6 +76,23 @@ import java.text.DateFormat
 import java.util.Locale
 import java.util.concurrent.Executors
 
+private object UiPalette {
+    val canvas = 0xFFF3F7F5.toInt()
+    val surface = Color.WHITE
+    val ink = 0xFF153539.toInt()
+    val muted = 0xFF647A7D.toInt()
+    val outline = 0xFFD8E4E1.toInt()
+    val primary = 0xFF147D73.toInt()
+    val primaryDeep = 0xFF0C5D57.toInt()
+    val primaryBright = 0xFF1DA892.toInt()
+    val primaryContainer = 0xFFE1F2EC.toInt()
+    val target = 0xFFE86F56.toInt()
+    val targetSoft = 0xFFFFE9E2.toInt()
+    val current = 0xFF3478E5.toInt()
+    val warning = 0xFFC78A36.toInt()
+    val error = 0xFFB94743.toInt()
+}
+
 class MainActivity : Activity() {
     private val handler = Handler(Looper.getMainLooper())
     private val geocoderExecutor = Executors.newSingleThreadExecutor()
@@ -77,9 +103,9 @@ class MainActivity : Activity() {
     private lateinit var statusDetailView: TextView
     private lateinit var favoritesButton: TextView
     private lateinit var startButton: TextView
-    private lateinit var centerButton: TextView
+    private lateinit var centerButton: ImageButton
     private lateinit var detailsGroup: LinearLayout
-    private lateinit var collapseToggle: TextView
+    private lateinit var collapseToggle: ImageButton
     private lateinit var locationSheet: LinearLayout
     private lateinit var placesStrip: LinearLayout
     private lateinit var savedPlacesTitle: TextView
@@ -90,6 +116,8 @@ class MainActivity : Activity() {
     private var map: MapLibreMap? = null
     private var currentSource: GeoJsonSource? = null
     private var mockSource: GeoJsonSource? = null
+    private var mockPinLayer: SymbolLayer? = null
+    private var currentHaloLayer: CircleLayer? = null
     private var pendingStart = false
     private var pendingLocate = false
     private var resumed = false
@@ -99,6 +127,7 @@ class MainActivity : Activity() {
     private var locationRequestGeneration = 0
     private var locationLookupActive = false
     private var hasFreshRealFix = false
+    private var spoofButtonState = "stopped"
     private var suppressMapSync = false
     private val debouncedMapSync = Runnable { syncMapToFields() }
     private val currentLocationTimeout = Runnable {
@@ -123,7 +152,7 @@ class MainActivity : Activity() {
         HttpRequestUtil.setOkHttpClient(
             OkHttpClient.Builder().addInterceptor { chain ->
                 chain.proceed(chain.request().newBuilder()
-                    .header("User-Agent", "LocationLab/0.3.2 (+https://github.com/Bhaveek08/AndroidLocationSpoofer)")
+                    .header("User-Agent", "GeoShift/0.4.0 (+https://github.com/Bhaveek08/AndroidLocationSpoofer)")
                     .build())
             }.build()
         )
@@ -189,7 +218,7 @@ class MainActivity : Activity() {
     }
 
     private fun buildUi(): View {
-        val root = FrameLayout(this).apply { setBackgroundColor(0xFFE8F1EF.toInt()); tag = "app-root" }
+        val root = FrameLayout(this).apply { setBackgroundColor(UiPalette.canvas); tag = "app-root" }
         mapView = mapView.apply {
             tag = "location-map"
             contentDescription = "Interactive map. Drag to move, pinch or use plus and minus to zoom, tap to choose a mock location."
@@ -199,6 +228,9 @@ class MainActivity : Activity() {
                 mapLibre.uiSettings.isTiltGesturesEnabled = false
                 mapLibre.uiSettings.isZoomGesturesEnabled = true
                 mapLibre.uiSettings.isDoubleTapGesturesEnabled = true
+                mapLibre.uiSettings.isQuickZoomGesturesEnabled = true
+                mapLibre.uiSettings.isFlingVelocityAnimationEnabled = true
+                mapLibre.uiSettings.isScaleVelocityAnimationEnabled = true
                 mapLibre.uiSettings.setAttributionGravity(Gravity.BOTTOM or Gravity.START)
                 mapLibre.uiSettings.setAttributionMargins(dp(8), 0, 0, dp(320))
                 val styleJson = assets.open("map-style.json").bufferedReader().use { it.readText() }
@@ -208,19 +240,19 @@ class MainActivity : Activity() {
                     mockSource = GeoJsonSource(SOURCE_MOCK, FeatureCollection.fromFeatures(emptyArray()))
                     style.addSource(currentSource!!)
                     style.addSource(mockSource!!)
-                    style.addLayer(CircleLayer("current-location-halo", SOURCE_CURRENT).withProperties(
-                        circleRadius(23f), circleColor(0x332F80ED), circleStrokeColor(0x552F80ED), circleStrokeWidth(1f)
-                    ))
+                    currentHaloLayer = CircleLayer("current-location-halo", SOURCE_CURRENT).withProperties(
+                        circleRadius(22f), circleColor(0x333478E5), circleStrokeColor(0x553478E5), circleStrokeWidth(1f)
+                    ).also(style::addLayer)
                     style.addLayer(CircleLayer("current-location-layer", SOURCE_CURRENT).withProperties(
-                        circleRadius(9f), circleColor(0xFF2473D4.toInt()), circleStrokeColor(Color.WHITE), circleStrokeWidth(3f)
+                        circleRadius(9f), circleColor(UiPalette.current), circleStrokeColor(Color.WHITE), circleStrokeWidth(3f)
                     ))
                     style.addLayer(CircleLayer("mock-location-halo", SOURCE_MOCK).withProperties(
-                        circleRadius(17f), circleColor(0x2230B88E), circleStrokeColor(0x8830B88E.toInt()), circleStrokeWidth(2f)
+                        circleRadius(18f), circleColor(0x33E86F56), circleStrokeColor(0x77E86F56), circleStrokeWidth(2f)
                     ))
                     style.addImage(MOCK_ICON, createMockPin())
-                    style.addLayer(SymbolLayer("mock-location-layer", SOURCE_MOCK).withProperties(
-                        iconImage(MOCK_ICON), iconAnchor(Property.ICON_ANCHOR_BOTTOM), iconAllowOverlap(true), iconIgnorePlacement(true)
-                    ))
+                    mockPinLayer = SymbolLayer("mock-location-layer", SOURCE_MOCK).withProperties(
+                        iconImage(MOCK_ICON), iconSize(1f), iconAnchor(Property.ICON_ANCHOR_BOTTOM), iconAllowOverlap(true), iconIgnorePlacement(true)
+                    ).also(style::addLayer)
                     if (realLocation == null) mapLibre.moveCamera(CameraUpdateFactory.newLatLngZoom(LatLng(20.0, 0.0), 2.5))
                     mapLibre.addOnMapClickListener { point ->
                         val selected = GeoPoint(point.latitude, point.longitude)
@@ -253,23 +285,29 @@ class MainActivity : Activity() {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(8), dp(5), dp(6), dp(5))
-            background = rounded(Color.WHITE, 20)
+            background = rounded(UiPalette.surface, 20, UiPalette.outline)
             elevation = dp(5).toFloat()
         }
-        searchRow.addView(text("⌕", 25f, 0xFF526660.toInt(), bold = true), LinearLayout.LayoutParams(dp(34), dp(44)).apply { gravity = Gravity.CENTER_VERTICAL })
-        searchRow.addView(addressInput, LinearLayout.LayoutParams(0, dp(44), 1f))
-        searchRow.addView(actionChip("Find", 0xFF176B5B.toInt(), Color.WHITE) { searchAddress() }, LinearLayout.LayoutParams(dp(64), dp(44)))
+        val searchIcon = ImageView(this).apply {
+            setImageResource(R.drawable.ic_search)
+            imageTintList = ColorStateList.valueOf(UiPalette.muted)
+            contentDescription = null
+        }
+        searchRow.addView(searchIcon, LinearLayout.LayoutParams(dp(34), dp(48)).apply { gravity = Gravity.CENTER_VERTICAL; marginStart = dp(4) })
+        searchRow.addView(addressInput, LinearLayout.LayoutParams(0, dp(48), 1f))
+        searchRow.addView(actionChip("Search", UiPalette.primary, Color.WHITE) { searchAddress() }, LinearLayout.LayoutParams(dp(78), dp(48)))
 
         val brandRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-        val brand = text("LOCATION LAB", 13f, Color.WHITE, bold = true).apply {
-            setPadding(dp(12), dp(8), dp(12), dp(8))
-            background = rounded(0xE612302A.toInt(), 20)
+        val brand = text("GEOSHIFT", 12f, Color.WHITE, bold = true).apply {
+            letterSpacing = 0.12f
+            setPadding(dp(14), dp(10), dp(14), dp(10))
+            background = rounded(0xF212363A.toInt(), 20)
             elevation = dp(4).toFloat()
         }
-        mapStatusChip = text("Finding you…", 12f, 0xFF174A41.toInt(), bold = true).apply {
+        mapStatusChip = text("Finding you…", 11f, UiPalette.ink, bold = true).apply {
             tag = "location-status"
             setPadding(dp(12), dp(8), dp(12), dp(8))
-            background = rounded(0xF2FFFFFF.toInt(), 20)
+            background = rounded(0xF8FFFFFF.toInt(), 20)
             elevation = dp(4).toFloat()
         }
         brandRow.addView(brand)
@@ -286,64 +324,87 @@ class MainActivity : Activity() {
         mapZoomControls = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
-            background = rounded(Color.WHITE, 18)
+            background = rounded(UiPalette.surface, 18, UiPalette.outline)
             elevation = dp(7).toFloat()
-            addView(iconControl("+", "Zoom in", 30f) { map?.animateCamera(CameraUpdateFactory.zoomIn()) }.apply { tag = "zoom-in"; minWidth = dp(50); minHeight = dp(50) })
-            val divider = View(this@MainActivity).apply { setBackgroundColor(0xFFE3EAE7.toInt()) }
+            addView(iconControl(R.drawable.ic_add, "Zoom in") { map?.animateCamera(CameraUpdateFactory.zoomIn(), 280) }.apply { tag = "zoom-in"; minWidth = dp(50); minHeight = dp(50) })
+            val divider = View(this@MainActivity).apply { setBackgroundColor(UiPalette.outline) }
             addView(divider, LinearLayout.LayoutParams(dp(34), dp(1)))
-            addView(iconControl("−", "Zoom out", 28f) { map?.animateCamera(CameraUpdateFactory.zoomOut()) }.apply { tag = "zoom-out"; minWidth = dp(50); minHeight = dp(50) })
+            addView(iconControl(R.drawable.ic_remove, "Zoom out") { map?.animateCamera(CameraUpdateFactory.zoomOut(), 280) }.apply { tag = "zoom-out"; minWidth = dp(50); minHeight = dp(50) })
         }
         val zoomParams = FrameLayout.LayoutParams(dp(52), dp(104), Gravity.TOP or Gravity.END).apply {
             topMargin = dp(142); marginEnd = dp(16)
         }
         root.addView(mapZoomControls, zoomParams)
-        centerButton = iconControl("◎", "Center on my current location", 25f) { locateCurrentLocation() }.apply {
+        centerButton = iconControl(R.drawable.ic_my_location, "Center on my current location") { locateCurrentLocation() }.apply {
             tag = "show-current-location"
-            background = rounded(Color.WHITE, 18)
+            background = rippleSurface(rounded(UiPalette.surface, 18, UiPalette.outline), 18)
             elevation = dp(7).toFloat()
         }
         root.addView(centerButton, FrameLayout.LayoutParams(dp(52), dp(52), Gravity.TOP or Gravity.END).apply { topMargin = dp(258); marginEnd = dp(16) })
 
         val sheet = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(18), dp(10), dp(18), dp(12))
-            background = roundedTopGradient(26)
+            setPadding(dp(20), dp(10), dp(20), dp(12))
+            background = roundedTopGradient(28)
+            foreground = android.graphics.drawable.GradientDrawable().apply {
+                setColor(Color.TRANSPARENT)
+                setCornerRadii(floatArrayOf(dp(28).toFloat(), dp(28).toFloat(), dp(28).toFloat(), dp(28).toFloat(), 0f, 0f, 0f, 0f))
+                setStroke(dp(1), 0xFFE6EEEB.toInt())
+            }
             elevation = dp(18).toFloat()
             layoutTransition = LayoutTransition().apply { setDuration(220); enableTransitionType(LayoutTransition.CHANGING) }
             tag = "location-control-sheet"
         }
         locationSheet = sheet
-        val handle = View(this).apply { background = rounded(0xFFD4DFDB.toInt(), 20) }
-        handle.setOnClickListener { toggleDetails() }
-        handle.contentDescription = "Expand or collapse location controls"
-        handle.isClickable = true
-        handle.isFocusable = true
-        sheet.addView(handle, LinearLayout.LayoutParams(dp(44), dp(8)).apply { gravity = Gravity.CENTER; bottomMargin = dp(8) })
+        val handle = FrameLayout(this).apply {
+            contentDescription = "Swipe up or tap to expand controls"
+            isClickable = true
+            isFocusable = true
+            addView(View(this@MainActivity).apply { background = rounded(0xFFCBD9D5.toInt(), 20) }, FrameLayout.LayoutParams(dp(42), dp(5), Gravity.CENTER))
+        }
+        var handleDownY = 0f
+        var handleDragged = false
+        handle.setOnTouchListener { _, event ->
+            when (event.actionMasked) {
+                android.view.MotionEvent.ACTION_DOWN -> { handleDownY = event.rawY; handleDragged = false; true }
+                android.view.MotionEvent.ACTION_MOVE -> { if (kotlin.math.abs(event.rawY - handleDownY) > dp(10)) handleDragged = true; true }
+                android.view.MotionEvent.ACTION_UP -> {
+                    val delta = event.rawY - handleDownY
+                    if (handleDragged && kotlin.math.abs(delta) > dp(24)) {
+                        val expanded = detailsGroup.visibility == View.VISIBLE
+                        if ((delta < 0 && !expanded) || (delta > 0 && expanded)) toggleDetails()
+                    } else toggleDetails()
+                    true
+                }
+                android.view.MotionEvent.ACTION_CANCEL -> true
+                else -> false
+            }
+        }
+        sheet.addView(handle, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(48)).apply { bottomMargin = dp(1) })
 
         val titleRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
         val titleStack = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        titleStack.addView(text("Set mock location", 19f, 0xFF173A33.toInt(), bold = true))
-        titleStack.addView(text("Tap to move the pin · pinch to zoom", 12f, 0xFF687A75.toInt()), LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(2) })
+        titleStack.addView(text("Choose a place", 19f, UiPalette.ink, bold = true))
+        titleStack.addView(text("Tap anywhere · pinch to explore", 12f, UiPalette.muted), LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(2) })
         titleRow.addView(titleStack, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        collapseToggle = text("⌃", 23f, 0xFF176B5B.toInt(), bold = true).apply {
+        collapseToggle = ImageButton(this).apply {
             tag = "details-toggle"
-            gravity = Gravity.CENTER
+            setImageResource(R.drawable.ic_expand_less)
+            imageTintList = ColorStateList.valueOf(UiPalette.primary)
             contentDescription = "Expand more location controls"
-            setPadding(dp(10), dp(4), dp(10), dp(4))
-            background = rounded(0xFFEAF3F0.toInt(), 14)
-            isClickable = true
-            isFocusable = true
+            background = rippleSurface(rounded(UiPalette.primaryContainer, 16), 16)
+            scaleType = ImageView.ScaleType.CENTER
             setOnClickListener { toggleDetails() }
         }
-        titleRow.addView(collapseToggle, LinearLayout.LayoutParams(dp(48), dp(42)))
+        titleRow.addView(collapseToggle, LinearLayout.LayoutParams(dp(48), dp(48)))
         titleRow.isClickable = true
         titleRow.setOnClickListener { toggleDetails() }
         sheet.addView(titleRow)
 
         val placesHeader = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-        savedPlacesTitle = text("SAVED PLACES", 10f, 0xFF71817C.toInt(), bold = true)
+        savedPlacesTitle = text("SAVED PLACES", 10f, UiPalette.muted, bold = true).apply { letterSpacing = 0.08f }
         placesHeader.addView(savedPlacesTitle, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        placesHeader.addView(actionChip("＋ Save", 0xFFEAF3F0.toInt(), 0xFF176B5B.toInt()) { addFavorite() }, LinearLayout.LayoutParams(dp(86), dp(34)))
+        placesHeader.addView(actionChip("Save place", UiPalette.primaryContainer, UiPalette.primaryDeep, onClick = { addFavorite() }, iconResource = R.drawable.ic_bookmark), LinearLayout.LayoutParams(dp(124), dp(48)))
         sheet.addView(placesHeader, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(11) })
 
         val placesScroll = android.widget.HorizontalScrollView(this).apply {
@@ -358,10 +419,10 @@ class MainActivity : Activity() {
         refreshSavedPlacesStrip()
 
         val legend = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-        legend.addView(colorDot(0xFF2473D4.toInt()), LinearLayout.LayoutParams(dp(9), dp(9)))
-        legend.addView(text("Your real fix", 11f, 0xFF4E635C.toInt(), bold = true), LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginStart = dp(5) })
-        legend.addView(colorDot(0xFF087E69.toInt()), LinearLayout.LayoutParams(dp(9), dp(9)).apply { marginStart = dp(14) })
-        legend.addView(text("Target pin", 11f, 0xFF4E635C.toInt(), bold = true), LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginStart = dp(5) })
+        legend.addView(colorDot(UiPalette.current), LinearLayout.LayoutParams(dp(9), dp(9)))
+        legend.addView(text("Real location", 11f, UiPalette.muted, bold = true), LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginStart = dp(5) })
+        legend.addView(colorDot(UiPalette.target), LinearLayout.LayoutParams(dp(9), dp(9)).apply { marginStart = dp(14) })
+        legend.addView(text("Mock target", 11f, UiPalette.muted, bold = true), LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginStart = dp(5) })
 
         val locationRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
         latitudeInput = edit("Latitude", signedDecimal = true).apply { setTextSize(14f); tag = "latitude-input"; contentDescription = "Selected latitude" }
@@ -372,13 +433,13 @@ class MainActivity : Activity() {
         installCoordinateWatchers()
 
         val shortcuts = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-        shortcuts.addView(actionChip("⌂  Home", 0xFFEAF3F0.toInt(), 0xFF176B5B.toInt()) { useHome() }, LinearLayout.LayoutParams(0, dp(42), 1f))
-        favoritesButton = actionChip("♡  Saved", 0xFFEAF3F0.toInt(), 0xFF176B5B.toInt()) { showFavorites() }
-        shortcuts.addView(favoritesButton, LinearLayout.LayoutParams(0, dp(42), 1f).apply { marginStart = dp(8) })
-        shortcuts.addView(actionChip("•••  More", 0xFFF0F3F2.toInt(), 0xFF40564F.toInt()) { showMoreOptions() }, LinearLayout.LayoutParams(0, dp(42), 1f).apply { marginStart = dp(8) })
+        shortcuts.addView(actionChip("Home", UiPalette.primaryContainer, UiPalette.primaryDeep, onClick = { useHome() }, iconResource = R.drawable.ic_home), LinearLayout.LayoutParams(0, dp(48), 1f))
+        favoritesButton = actionChip("Saved", UiPalette.primaryContainer, UiPalette.primaryDeep, onClick = { showFavorites() }, iconResource = R.drawable.ic_bookmark)
+        shortcuts.addView(favoritesButton, LinearLayout.LayoutParams(0, dp(48), 1f).apply { marginStart = dp(8) })
+        shortcuts.addView(actionChip("More", 0xFFEAF0EE.toInt(), UiPalette.ink, onClick = { showMoreOptions() }, iconResource = R.drawable.ic_more), LinearLayout.LayoutParams(0, dp(48), 1f).apply { marginStart = dp(8) })
         val statusRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-        statusView = text("Checking status…", 12f, 0xFF176B5B.toInt(), bold = true).apply { tag = "status-title" }
-        statusDetailView = text("", 11f, 0xFF687A75.toInt()).apply { tag = "status-detail"; maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END }
+        statusView = text("Checking status…", 12f, UiPalette.primaryDeep, bold = true).apply { tag = "status-title" }
+        statusDetailView = text("", 11f, UiPalette.muted).apply { tag = "status-detail"; maxLines = 2; ellipsize = android.text.TextUtils.TruncateAt.END }
         statusRow.addView(statusView, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         statusRow.addView(statusDetailView, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginStart = dp(8) })
 
@@ -393,19 +454,20 @@ class MainActivity : Activity() {
         sheet.addView(detailsGroup, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(10) })
 
         val actions = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-        startButton = actionChip("▶   Start spoofing", 0xFF176B5B.toInt(), Color.WHITE) { toggleSpoofing() }.apply {
+        startButton = actionChip("Start spoofing", UiPalette.primary, Color.WHITE) { toggleSpoofing() }.apply {
             textSize = 15f
             tag = "spoof-toggle"
             contentDescription = "Start spoofing"
-            background = GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT, intArrayOf(0xFF126557.toInt(), 0xFF1B8A70.toInt())).apply { cornerRadius = dp(16).toFloat() }
+            background = buttonGradient(UiPalette.primaryDeep, UiPalette.primaryBright)
             elevation = dp(4).toFloat()
             minHeight = dp(58)
         }
+        setButtonIcon(R.drawable.ic_play)
         actions.addView(startButton, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(58)))
         sheet.addView(actions, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(10) })
         root.addView(sheet, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM))
 
-        mapAttribution = text("© OpenStreetMap", 10f, 0xFF30443E.toInt()).apply {
+        mapAttribution = text("© OpenStreetMap", 10f, UiPalette.ink).apply {
             setPadding(dp(7), dp(4), dp(7), dp(4))
             background = rounded(0xF2FFFFFF.toInt(), 8)
             elevation = dp(4).toFloat()
@@ -434,7 +496,7 @@ class MainActivity : Activity() {
             (topOverlay.layoutParams as FrameLayout.LayoutParams).also { it.topMargin = topInset + dp(12) }.let { topOverlay.layoutParams = it }
             (mapZoomControls.layoutParams as FrameLayout.LayoutParams).also { it.topMargin = topInset + dp(142) }.let { mapZoomControls.layoutParams = it }
             (centerButton.layoutParams as FrameLayout.LayoutParams).also { it.topMargin = topInset + dp(258) }.let { centerButton.layoutParams = it }
-            sheet.setPadding(dp(18), dp(10), dp(18), dp(12) + bottomSystemInset)
+            sheet.setPadding(dp(20), dp(10), dp(20), dp(12) + bottomSystemInset)
             insets
         }
         return root
@@ -485,18 +547,55 @@ class MainActivity : Activity() {
         val lon = longitudeInput.text.toString().toDoubleOrNull() ?: return
         if (!lat.isFinite() || !lon.isFinite() || lat !in -90.0..90.0 || lon !in -180.0..180.0) return
         updateMockPin(GeoPoint(lat, lon), moveCamera = true)
+        refreshSavedPlacesStrip()
     }
 
     private fun updateMockPin(point: GeoPoint?, moveCamera: Boolean = false) {
         if (point == null) mockSource?.setGeoJson(FeatureCollection.fromFeatures(emptyArray()))
-        else mockSource?.setGeoJson(Feature.fromGeometry(Point.fromLngLat(point.longitude, point.latitude)))
+        else {
+            mockSource?.setGeoJson(Feature.fromGeometry(Point.fromLngLat(point.longitude, point.latitude)))
+            popTargetPin()
+        }
         if (moveCamera && point != null) moveCameraToSelection(point)
     }
 
+    private fun popTargetPin() {
+        val layer = mockPinLayer ?: return
+        if (!motionAllowed()) {
+            layer.setProperties(iconSize(1f))
+            return
+        }
+        ValueAnimator.ofFloat(0.72f, 1f).apply {
+            duration = 300L
+            interpolator = OvershootInterpolator(1.15f)
+            addUpdateListener { layer.setProperties(iconSize(it.animatedValue as Float)) }
+            start()
+        }
+    }
+
+    private fun pulseCurrentLocation() {
+        val layer = currentHaloLayer ?: return
+        if (!motionAllowed()) return
+        ValueAnimator.ofFloat(0f, 1f).apply {
+            duration = 650L
+            addUpdateListener { animation ->
+                val progress = animation.animatedValue as Float
+                if (progress >= .999f) layer.setProperties(circleRadius(22f), circleOpacity(.2f))
+                else layer.setProperties(circleRadius(15f + progress * 14f), circleOpacity(.42f * (1f - progress)))
+            }
+            start()
+        }
+    }
+
+    private fun motionAllowed() = android.provider.Settings.Global.getFloat(
+        contentResolver, android.provider.Settings.Global.ANIMATOR_DURATION_SCALE, 1f
+    ) > 0f
+
     private fun updateCurrentPin(point: GeoPoint) {
         currentSource?.setGeoJson(Feature.fromGeometry(Point.fromLngLat(point.longitude, point.latitude)))
+        pulseCurrentLocation()
         val selected = runCatching { GeoPoint.parse(latitudeInput.text.toString(), longitudeInput.text.toString()) }.getOrNull()
-        if (selected == null) map?.animateCamera(CameraUpdateFactory.newLatLngZoom(LatLng(point.latitude, point.longitude), 16.0))
+        if (selected == null) map?.animateCamera(CameraUpdateFactory.newLatLngZoom(LatLng(point.latitude, point.longitude), 16.0), 480)
         else if (kotlin.math.abs(selected.latitude - point.latitude) > 0.02 || kotlin.math.abs(selected.longitude - point.longitude) > 0.02) fitLocations(selected, point)
     }
 
@@ -505,14 +604,14 @@ class MainActivity : Activity() {
         if (current != null && (kotlin.math.abs(current.latitude - point.latitude) > 0.02 || kotlin.math.abs(current.longitude - point.longitude) > 0.02)) {
             fitLocations(point, current)
         } else {
-            map?.animateCamera(CameraUpdateFactory.newLatLngZoom(LatLng(point.latitude, point.longitude), 14.5))
+            map?.animateCamera(CameraUpdateFactory.newLatLngZoom(LatLng(point.latitude, point.longitude), 14.5), 480)
         }
     }
 
     private fun fitLocations(first: GeoPoint, second: GeoPoint) {
         val bounds = org.maplibre.android.geometry.LatLngBounds.Builder()
             .include(LatLng(first.latitude, first.longitude)).include(LatLng(second.latitude, second.longitude)).build()
-        map?.animateCamera(CameraUpdateFactory.newLatLngBounds(bounds, dp(52)))
+        map?.animateCamera(CameraUpdateFactory.newLatLngBounds(bounds, dp(52)), 520)
     }
 
     private fun createMockPin(): Bitmap {
@@ -520,7 +619,7 @@ class MainActivity : Activity() {
         val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(bitmap)
         val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = 0xFF087E69.toInt()
+            color = UiPalette.target
             setShadowLayer(dp(2).toFloat(), 0f, dp(2).toFloat(), 0x55000000)
         }
         val path = Path().apply {
@@ -534,11 +633,11 @@ class MainActivity : Activity() {
         canvas.drawPath(path, paint)
         paint.clearShadowLayer()
         paint.style = Paint.Style.FILL
-        paint.color = 0xFF087E69.toInt()
+        paint.color = UiPalette.target
         canvas.drawPath(path, paint)
         paint.color = Color.WHITE
         canvas.drawCircle(size * .5f, size * .31f, size * .145f, paint)
-        paint.color = 0xFF087E69.toInt()
+        paint.color = UiPalette.target
         canvas.drawCircle(size * .5f, size * .31f, size * .075f, paint)
         return bitmap
     }
@@ -704,7 +803,7 @@ class MainActivity : Activity() {
             return
         }
         if (!isSelectedMockApp()) {
-            showStatus("Select Location Lab as the mock app", "Open Developer options and choose Location Lab under Select mock location app.")
+            showStatus("Select GeoShift as the mock app", "Open Developer options and choose GeoShift under Select mock location app.")
             return
         }
         val manager = getSystemService(Context.LOCATION_SERVICE) as LocationManager
@@ -788,9 +887,8 @@ class MainActivity : Activity() {
             showStatus("No Home saved", "Choose coordinates, then tap Save as Home.")
             return
         }
-        latitudeInput.setText(lat)
-        longitudeInput.setText(lon)
-        addressInput.setText(prefs.getString(KEY_HOME_LABEL, "Home"))
+        val point = runCatching { GeoPoint.parse(lat, lon) }.getOrNull() ?: return
+        selectSavedPlace(SavedPlace(prefs.getString(KEY_HOME_LABEL, "Home") ?: "Home", point))
     }
 
     private fun addFavorite() {
@@ -817,22 +915,42 @@ class MainActivity : Activity() {
     }
 
     private fun showFavorites() {
-        val favorites = readFavorites()
-        if (favorites.isEmpty()) {
-            addFavorite()
+        val places = mutableListOf<Pair<Boolean, SavedPlace>>()
+        val prefs = getPreferences(Context.MODE_PRIVATE)
+        val homeLat = prefs.getString(KEY_HOME_LAT, null)?.toDoubleOrNull()
+        val homeLon = prefs.getString(KEY_HOME_LON, null)?.toDoubleOrNull()
+        if (homeLat != null && homeLon != null) {
+            runCatching { GeoPoint.parse(homeLat.toString(), homeLon.toString()) }.getOrNull()?.let {
+                places += true to SavedPlace(prefs.getString(KEY_HOME_LABEL, "Home") ?: "Home", it)
+            }
+        }
+        readFavorites().forEach { places += false to it }
+        if (places.isEmpty()) {
+            AlertDialog.Builder(this).setTitle("No saved places yet")
+                .setMessage("Save your current map pin to make it available here.")
+                .setPositiveButton("Save this place") { _, _ -> addFavorite() }
+                .setNegativeButton("Close", null).show()
             return
         }
         AlertDialog.Builder(this)
-            .setTitle("Saved places")
-            .setItems(favorites.map { "${it.name}  ·  ${it.point.latitude}, ${it.point.longitude}" }.toTypedArray()) { _, which ->
-                val selected = favorites[which]
-                addressInput.setText(selected.name)
-                latitudeInput.setText(formatCoordinate(selected.point.latitude))
-                longitudeInput.setText(formatCoordinate(selected.point.longitude))
+            .setTitle("Choose a saved place")
+            .setItems(places.map { (isHome, place) -> "${if (isHome) "HOME" else "SAVED"}  ·  ${place.name}  ·  ${formatCoordinate(place.point.latitude)}, ${formatCoordinate(place.point.longitude)}" }.toTypedArray()) { _, which ->
+                selectSavedPlace(places[which].second)
             }
             .setNeutralButton("Add current place") { _, _ -> addFavorite() }
             .setNegativeButton("Close", null)
             .show()
+    }
+
+    private fun selectSavedPlace(place: SavedPlace) {
+        suppressMapSync = true
+        addressInput.setText(place.name)
+        latitudeInput.setText(formatCoordinate(place.point.latitude))
+        longitudeInput.setText(formatCoordinate(place.point.longitude))
+        suppressMapSync = false
+        updateMockPin(place.point, moveCamera = true)
+        refreshSavedPlacesStrip()
+        showStatus("Location selected", place.name)
     }
 
     private fun readFavorites(): List<SavedPlace> {
@@ -886,14 +1004,14 @@ class MainActivity : Activity() {
                     prefs.getString(MockLocationService.KEY_DETAIL, ""),
                     formattedTime
                 )
-                statusView.setTextColor(0xFF176B5B.toInt())
+                statusView.setTextColor(UiPalette.primaryDeep)
             }
             "error" -> {
                 setSpoofButton("stopped")
                 if (::mapStatusChip.isInitialized) mapStatusChip.text = "SETUP NEEDED"
                 statusView.setText(R.string.status_mock_location_failed)
                 statusDetailView.text = prefs.getString(MockLocationService.KEY_DETAIL, "Check Developer options and permissions.")
-                statusView.setTextColor(0xFFB3261E.toInt())
+                statusView.setTextColor(UiPalette.error)
             }
             "starting" -> {
                 setSpoofButton("starting")
@@ -911,8 +1029,8 @@ class MainActivity : Activity() {
                     }
                 }
                 statusView.text = if (ready) "Ready to start" else "Setup needed"
-                statusDetailView.text = if (ready) "Choose a location, then tap Start mock location." else "Select Location Lab in Developer options to enable Android mock providers."
-                statusView.setTextColor(if (ready) 0xFF176B5B.toInt() else 0xFF705C00.toInt())
+                statusDetailView.text = if (ready) "Choose a place, then tap Start spoofing." else "Select GeoShift in Developer options to enable Android mock providers."
+                statusView.setTextColor(if (ready) UiPalette.primaryDeep else UiPalette.warning)
             }
         }
         handler.removeCallbacks(statusPoll)
@@ -927,29 +1045,43 @@ class MainActivity : Activity() {
 
     private fun setSpoofButton(state: String) {
         if (!::startButton.isInitialized) return
+        if (spoofButtonState == state) return
+        spoofButtonState = state
         when (state) {
             "active" -> {
-                startButton.text = "■   Stop spoofing"
+                startButton.text = "Stop spoofing"
+                setButtonIcon(R.drawable.ic_stop)
                 startButton.contentDescription = "Stop spoofing"
-                startButton.background = GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT, intArrayOf(0xFFB8443C.toInt(), 0xFFD95D50.toInt())).apply { cornerRadius = dp(16).toFloat() }
+                startButton.background = buttonGradient(0xFFA93F43.toInt(), 0xFFD65F55.toInt())
+                animateButtonState()
             }
             "starting" -> {
-                startButton.text = "◌   Starting…  ·  Tap to stop"
+                startButton.text = "Starting…  ·  Tap to stop"
+                setButtonIcon(R.drawable.ic_stop)
                 startButton.contentDescription = "Stop starting mock location"
-                startButton.background = GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT, intArrayOf(0xFF866529.toInt(), 0xFFAA8538.toInt())).apply { cornerRadius = dp(16).toFloat() }
+                startButton.background = buttonGradient(0xFF8F5E27.toInt(), 0xFFB78035.toInt())
             }
             else -> {
-                startButton.text = "▶   Start spoofing"
+                startButton.text = "Start spoofing"
+                setButtonIcon(R.drawable.ic_play)
                 startButton.contentDescription = "Start spoofing"
-                startButton.background = GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT, intArrayOf(0xFF126557.toInt(), 0xFF1B8A70.toInt())).apply { cornerRadius = dp(16).toFloat() }
+                startButton.background = buttonGradient(UiPalette.primaryDeep, UiPalette.primaryBright)
             }
         }
+    }
+
+    private fun animateButtonState() {
+        if (android.provider.Settings.Global.getFloat(contentResolver, android.provider.Settings.Global.ANIMATOR_DURATION_SCALE, 1f) == 0f) return
+        startButton.animate().cancel()
+        startButton.scaleX = 0.97f
+        startButton.scaleY = 0.97f
+        startButton.animate().scaleX(1f).scaleY(1f).setDuration(220L).start()
     }
 
     private fun showStatus(title: String, detail: String) {
         if (!::statusView.isInitialized) return
         statusView.text = title
-        statusView.setTextColor(0xFF172C29.toInt())
+        statusView.setTextColor(UiPalette.ink)
         statusDetailView.text = detail
         if (::mapStatusChip.isInitialized) {
             mapStatusChip.text = when (title) {
@@ -967,7 +1099,7 @@ class MainActivity : Activity() {
 
     private fun horizontal() = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
 
-    private fun actionChip(label: String, backgroundColor: Int, foregroundColor: Int, onClick: () -> Unit) = TextView(this).apply {
+    private fun actionChip(label: String, backgroundColor: Int, foregroundColor: Int, onClick: () -> Unit, iconResource: Int? = null) = TextView(this).apply {
         text = label
         textSize = 13f
         gravity = Gravity.CENTER
@@ -976,31 +1108,58 @@ class MainActivity : Activity() {
         includeFontPadding = false
         setTextColor(foregroundColor)
         setPadding(dp(8), dp(7), dp(8), dp(7))
-        background = android.graphics.drawable.RippleDrawable(
-            android.content.res.ColorStateList.valueOf(0x332C7C69), rounded(backgroundColor, 14), null
-        )
+        minHeight = dp(48)
+        if (iconResource != null) {
+            val icon = requireNotNull(getDrawable(iconResource)).mutate()
+            icon.setTint(foregroundColor)
+            icon.setBounds(0, 0, dp(16), dp(16))
+            setCompoundDrawablesRelative(icon, null, null, null)
+            compoundDrawablePadding = dp(6)
+        }
+        background = RippleDrawable(ColorStateList.valueOf(0x332C7C69), rounded(backgroundColor, 14), rounded(Color.WHITE, 14))
         isClickable = true
         isFocusable = true
         setOnClickListener { performHapticFeedback(android.view.HapticFeedbackConstants.CONTEXT_CLICK); onClick() }
     }
 
-    private fun iconControl(symbol: String, label: String, size: Float, onClick: () -> Unit) = TextView(this).apply {
-        text = symbol
+    private fun iconControl(iconResource: Int, label: String, onClick: () -> Unit) = ImageButton(this).apply {
+        setImageResource(iconResource)
+        imageTintList = ColorStateList.valueOf(UiPalette.ink)
         contentDescription = label
-        textSize = size
-        gravity = Gravity.CENTER
-        includeFontPadding = false
-        setTextColor(0xFF21443C.toInt())
+        scaleType = ImageView.ScaleType.CENTER
+        setPadding(dp(13), dp(13), dp(13), dp(13))
+        background = rippleSurface(ColorDrawable(Color.TRANSPARENT), 16)
+        minWidth = dp(48)
+        minHeight = dp(48)
         isClickable = true
         isFocusable = true
         setOnClickListener { performHapticFeedback(android.view.HapticFeedbackConstants.CONTEXT_CLICK); onClick() }
+    }
+
+    private fun rippleSurface(content: android.graphics.drawable.Drawable, radiusDp: Int) = RippleDrawable(
+        ColorStateList.valueOf(0x263E716B), content, rounded(Color.WHITE, radiusDp)
+    )
+
+    private fun buttonGradient(vararg colors: Int) = RippleDrawable(
+        ColorStateList.valueOf(0x55FFFFFF),
+        GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT, colors).apply { cornerRadius = dp(18).toFloat() },
+        rounded(Color.WHITE, 18)
+    )
+
+    private fun setButtonIcon(resource: Int) {
+        val icon = requireNotNull(getDrawable(resource)).mutate()
+        icon.setTint(Color.WHITE)
+        icon.setBounds(0, 0, dp(20), dp(20))
+        startButton.setCompoundDrawablesRelative(icon, null, null, null)
+        startButton.compoundDrawablePadding = dp(9)
     }
 
     private fun text(value: String, size: Float, color: Int, bold: Boolean = false) = TextView(this).apply {
         text = value
         textSize = size
         setTextColor(color)
-        if (bold) setTypeface(typeface, android.graphics.Typeface.BOLD)
+        includeFontPadding = false
+        if (bold) setTypeface(android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL))
     }
 
     private fun edit(hintText: String, signedDecimal: Boolean = false) = EditText(this).apply {
@@ -1018,7 +1177,7 @@ class MainActivity : Activity() {
         isAllCaps = false
         minHeight = dp(46)
         textSize = 14f
-        setTextColor(0xFF24433D.toInt())
+        setTextColor(UiPalette.ink)
         background = rounded(0xFFF0F3F2.toInt(), 14)
         setOnClickListener { onClick() }
     }
@@ -1046,7 +1205,7 @@ class MainActivity : Activity() {
 
     private fun roundedTopGradient(radiusDp: Int) = GradientDrawable(
         GradientDrawable.Orientation.TOP_BOTTOM,
-        intArrayOf(Color.WHITE, 0xFFF2F8F6.toInt())
+        intArrayOf(Color.WHITE, UiPalette.canvas)
     ).apply {
         val radius = dp(radiusDp).toFloat()
         setCornerRadii(floatArrayOf(radius, radius, radius, radius, 0f, 0f, 0f, 0f))
@@ -1055,7 +1214,7 @@ class MainActivity : Activity() {
     private fun toggleDetails() {
         val expanded = detailsGroup.visibility != View.VISIBLE
         detailsGroup.visibility = if (expanded) View.VISIBLE else View.GONE
-        collapseToggle.text = if (expanded) "⌄" else "⌃"
+        collapseToggle.setImageResource(if (expanded) R.drawable.ic_expand_more else R.drawable.ic_expand_less)
         collapseToggle.contentDescription = if (expanded) "Collapse extra location controls" else "Expand extra location controls"
         locationSheet.performHapticFeedback(android.view.HapticFeedbackConstants.CONTEXT_CLICK)
     }
@@ -1073,8 +1232,11 @@ class MainActivity : Activity() {
         }
         readFavorites().forEach { items += false to it }
         if (::savedPlacesTitle.isInitialized) savedPlacesTitle.text = "SAVED PLACES  ·  ${items.size}"
+        val selectedPoint = if (::latitudeInput.isInitialized && ::longitudeInput.isInitialized) {
+            runCatching { GeoPoint.parse(latitudeInput.text.toString(), longitudeInput.text.toString()) }.getOrNull()
+        } else null
         if (items.isEmpty()) {
-            placesStrip.addView(text("Choose a point, then tap + Save", 12f, 0xFF7A8984.toInt()).apply {
+            placesStrip.addView(text("Choose a point, then tap + Save place", 12f, UiPalette.muted).apply {
                 gravity = Gravity.CENTER_VERTICAL
                 contentDescription = "No saved places yet. Choose a point on the map, then save it."
             }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(42)))
@@ -1088,32 +1250,35 @@ class MainActivity : Activity() {
                 tag = "saved-place-$testableName"
                 contentDescription = "Use saved place ${place.name}, ${formatCoordinate(place.point.latitude)}, ${formatCoordinate(place.point.longitude)}"
                 setPadding(dp(10), dp(6), dp(13), dp(6))
-                val cardColor = if (isHome) 0xFFE8F4EF.toInt() else Color.WHITE
+                val isSelected = selectedPoint == place.point
+                val cardColor = when { isSelected -> UiPalette.targetSoft; isHome -> UiPalette.primaryContainer; else -> UiPalette.surface }
                 background = android.graphics.drawable.RippleDrawable(
                     android.content.res.ColorStateList.valueOf(0x332C7C69),
-                    rounded(cardColor, 16, if (isHome) 0xFFBBD8CC.toInt() else 0xFFDCE9E4.toInt()), null
+                    rounded(cardColor, 16, if (isSelected) UiPalette.target else if (isHome) 0xFFBBD8CC.toInt() else UiPalette.outline), rounded(Color.WHITE, 16)
                 )
                 elevation = dp(1).toFloat()
                 isClickable = true
                 isFocusable = true
-                val icon = TextView(this@MainActivity).apply {
-                    text = if (isHome) "⌂" else "●"
-                    textSize = if (isHome) 21f else 13f
-                    gravity = Gravity.CENTER
-                    setTextColor(if (isHome) 0xFF126557.toInt() else 0xFF2473D4.toInt())
-                    background = rounded(if (isHome) 0xFFD5EAE1.toInt() else 0xFFE5EFFB.toInt(), 12)
+                val icon = ImageView(this@MainActivity).apply {
+                    setImageResource(if (isHome) R.drawable.ic_home else R.drawable.ic_place)
+                    imageTintList = ColorStateList.valueOf(if (isHome) UiPalette.primaryDeep else UiPalette.target)
+                    scaleType = ImageView.ScaleType.CENTER_INSIDE
+                    background = rounded(if (isHome) 0xFFD5EAE1.toInt() else UiPalette.targetSoft, 12)
                 }
                 addView(icon, LinearLayout.LayoutParams(dp(38), dp(38)))
                 val labels = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.VERTICAL }
-                labels.addView(text(place.name, 12f, 0xFF214B42.toInt(), bold = true).apply { maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END })
-                labels.addView(text("${formatCoordinate(place.point.latitude)}, ${formatCoordinate(place.point.longitude)}", 9f, 0xFF72817C.toInt()).apply { maxLines = 1 })
+                labels.addView(text(place.name, 12f, UiPalette.ink, bold = true).apply { maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END })
+                labels.addView(text("${formatCoordinate(place.point.latitude)}, ${formatCoordinate(place.point.longitude)}", 9f, UiPalette.muted).apply { maxLines = 1 })
                 addView(labels, LinearLayout.LayoutParams(dp(112), ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginStart = dp(8) })
                 setOnClickListener {
-                    addressInput.setText(place.name)
-                    latitudeInput.setText(formatCoordinate(place.point.latitude))
-                    longitudeInput.setText(formatCoordinate(place.point.longitude))
-                    showStatus("Location selected", place.name)
+                    selectSavedPlace(place)
                     performHapticFeedback(android.view.HapticFeedbackConstants.CONTEXT_CLICK)
+                }
+                contentDescription = "Use ${place.name} at ${formatCoordinate(place.point.latitude)}, ${formatCoordinate(place.point.longitude)}${if (isSelected) ", selected" else ""}; long press to rename or remove"
+                setOnLongClickListener {
+                    performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS)
+                    manageSavedPlace(isHome, place)
+                    true
                 }
             }
             placesStrip.addView(chip, LinearLayout.LayoutParams(dp(186), dp(52)).apply { marginEnd = dp(8) })
@@ -1121,6 +1286,44 @@ class MainActivity : Activity() {
     }
 
     private fun formatCoordinate(value: Double) = String.format(Locale.US, "%.8f", value)
+
+    private fun manageSavedPlace(isHome: Boolean, place: SavedPlace) {
+        val actions = arrayOf("Rename", "Remove")
+        AlertDialog.Builder(this)
+            .setTitle(place.name)
+            .setItems(actions) { _, selected ->
+                if (selected == 0) {
+                    val input = EditText(this).apply { hint = "Place name"; setText(place.name); selectAll() }
+                    AlertDialog.Builder(this).setTitle("Rename saved place").setView(input)
+                        .setPositiveButton("Save") { _, _ ->
+                            val newName = input.text.toString().trim().ifEmpty { place.name }
+                            if (isHome) {
+                                getPreferences(Context.MODE_PRIVATE).edit().putString(KEY_HOME_LABEL, newName).apply()
+                                refreshSavedPlacesStrip()
+                            } else {
+                                val places = readFavorites().toMutableList()
+                                val index = places.indexOfFirst { it.name == place.name && it.point == place.point }
+                                if (index >= 0) places[index] = place.copy(name = newName)
+                                writeFavorites(places)
+                            }
+                            showStatus("Place renamed", newName)
+                        }.setNegativeButton("Cancel", null).show()
+                } else {
+                    AlertDialog.Builder(this).setTitle("Remove ${place.name}?")
+                        .setMessage("This removes the saved shortcut. It does not change your active location.")
+                        .setPositiveButton("Remove") { _, _ ->
+                            if (isHome) {
+                                getPreferences(Context.MODE_PRIVATE).edit()
+                                    .remove(KEY_HOME_LAT).remove(KEY_HOME_LON).remove(KEY_HOME_LABEL).apply()
+                                refreshSavedPlacesStrip()
+                            } else {
+                                writeFavorites(readFavorites().filterNot { it.name == place.name && it.point == place.point })
+                            }
+                            showStatus("Place removed", place.name)
+                        }.setNegativeButton("Keep", null).show()
+                }
+            }.setNegativeButton("Cancel", null).show()
+    }
 
     private data class SavedPlace(val name: String, val point: GeoPoint)
 

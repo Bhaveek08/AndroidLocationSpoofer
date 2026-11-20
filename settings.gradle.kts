@@ -14,5 +14,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "AndroidLocationLab"
+rootProject.name = "GeoShift"
 include(":app")

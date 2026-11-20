@@ -28,7 +28,7 @@ class MockLocationRoundTripTest {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
         val launcher = context.packageManager.getLaunchIntentForPackage(context.packageName)
-            ?: error("Location Lab launcher activity was not found.")
+            ?: error("GeoShift launcher activity was not found.")
         val activity = instrumentation.startActivitySync(launcher.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
         val root = activity.window.decorView
         val toggle = root.findViewWithTag("spoof-toggle") as? android.widget.TextView
@@ -36,7 +36,9 @@ class MockLocationRoundTripTest {
         val prefs = context.getSharedPreferences(MockLocationService.PREFS, Context.MODE_PRIVATE)
         val oldState = prefs.getString(MockLocationService.KEY_STATE, null)
         try {
+            assertEquals("The launcher name should match the GeoShift brand.", "GeoShift", context.packageManager.getApplicationLabel(context.applicationInfo).toString())
             assertEquals("Start spoofing", toggle.contentDescription)
+            assertTrue("The action should use a consistent vector icon.", toggle.compoundDrawablesRelative[0] != null)
             assertEquals("The control should fill the action row.", ViewGroup.LayoutParams.MATCH_PARENT, toggle.layoutParams.width)
             assertTrue("There should be no separate stop control.", root.findViewWithTag<View>("stop-mock") == null)
             instrumentation.runOnMainSync {
@@ -64,7 +66,7 @@ class MockLocationRoundTripTest {
         val context = instrumentation.targetContext
         instrumentation.uiAutomation.grantRuntimePermission(context.packageName, Manifest.permission.ACCESS_FINE_LOCATION)
         val launcher = context.packageManager.getLaunchIntentForPackage(context.packageName)
-            ?: error("Location Lab launcher activity was not found.")
+            ?: error("GeoShift launcher activity was not found.")
         val activity = instrumentation.startActivitySync(launcher.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
         val root = activity.window.decorView
         val latitude = root.findViewWithTag("latitude-input") as EditText
@@ -87,6 +89,9 @@ class MockLocationRoundTripTest {
                     ?: error("The second saved place was not visible in the map sheet.")
                 first.performClick()
                 assertTrue("Saved place chip should respond to taps.", first.isClickable && second.isClickable)
+                val selected = root.findViewWithTag<View>("saved-place-first-test-place")
+                    ?: error("The selected place card should remain visible after loading it.")
+                assertTrue("The selected saved place should be announced as selected.", selected.contentDescription.toString().contains("selected"))
             }
             assertEquals("12.50000000", latitude.text.toString())
             assertEquals("44.25000000", longitude.text.toString())
@@ -108,7 +113,7 @@ class MockLocationRoundTripTest {
         val context = instrumentation.targetContext
         instrumentation.uiAutomation.grantRuntimePermission(context.packageName, Manifest.permission.ACCESS_FINE_LOCATION)
         val launcher = context.packageManager.getLaunchIntentForPackage(context.packageName)
-            ?: error("Location Lab launcher activity was not found.")
+            ?: error("GeoShift launcher activity was not found.")
         val activity = instrumentation.startActivitySync(launcher.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
         val root = activity.window.decorView
         val map = root.findViewWithTag("location-map") as? View
@@ -179,7 +184,7 @@ class MockLocationRoundTripTest {
         val context = instrumentation.targetContext
         instrumentation.uiAutomation.grantRuntimePermission(context.packageName, Manifest.permission.ACCESS_FINE_LOCATION)
         val launcher = context.packageManager.getLaunchIntentForPackage(context.packageName)
-            ?: error("Location Lab launcher activity was not found.")
+            ?: error("GeoShift launcher activity was not found.")
         val activity = instrumentation.startActivitySync(launcher.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
         val manager = context.getSystemService(Context.LOCATION_SERVICE) as LocationManager
         val target = GeoPoint(37.4219983, -122.084)
@@ -208,7 +213,7 @@ class MockLocationRoundTripTest {
             instrumentation.uiAutomation.grantRuntimePermission(context.packageName, Manifest.permission.POST_NOTIFICATIONS)
         }
         val launcher = context.packageManager.getLaunchIntentForPackage(context.packageName)
-            ?: error("Location Lab launcher activity was not found.")
+            ?: error("GeoShift launcher activity was not found.")
         val activity = instrumentation.startActivitySync(launcher.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
         val prefs = context.getSharedPreferences(MockLocationService.PREFS, Context.MODE_PRIVATE)
         try {
