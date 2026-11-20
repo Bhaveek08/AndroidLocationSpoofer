@@ -9,6 +9,8 @@ import android.os.SystemClock
 import android.view.MotionEvent
 import android.view.View
 import android.widget.EditText
+import org.json.JSONArray
+import org.json.JSONObject
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import java.util.concurrent.CountDownLatch
@@ -21,9 +23,54 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 class MockLocationRoundTripTest {
     @Test
+    fun savedPlacesAreVisibleAndSelectTheirCoordinates() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val context = instrumentation.targetContext
+        instrumentation.uiAutomation.grantRuntimePermission(context.packageName, Manifest.permission.ACCESS_FINE_LOCATION)
+        val launcher = context.packageManager.getLaunchIntentForPackage(context.packageName)
+            ?: error("Location Lab launcher activity was not found.")
+        val activity = instrumentation.startActivitySync(launcher.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        val root = activity.window.decorView
+        val latitude = root.findViewWithTag("latitude-input") as EditText
+        val longitude = root.findViewWithTag("longitude-input") as EditText
+        var hadFavorites = false
+        var previousFavorites: String? = null
+        try {
+            instrumentation.runOnMainSync {
+                val prefs = activity.getPreferences(Context.MODE_PRIVATE)
+                hadFavorites = prefs.contains("favorites")
+                previousFavorites = prefs.getString("favorites", null)
+                val samples = JSONArray()
+                    .put(JSONObject().put("name", "First test place").put("lat", 12.5).put("lon", 44.25))
+                    .put(JSONObject().put("name", "Second test place").put("lat", -7.75).put("lon", 151.2))
+                prefs.edit().putString("favorites", samples.toString()).commit()
+                activity.javaClass.getDeclaredMethod("refreshSavedPlacesStrip").apply { isAccessible = true }.invoke(activity)
+                val first = root.findViewWithTag("saved-place-first-test-place") as? View
+                    ?: error("The first saved place was not visible in the map sheet.")
+                val second = root.findViewWithTag("saved-place-second-test-place") as? View
+                    ?: error("The second saved place was not visible in the map sheet.")
+                first.performClick()
+                assertTrue("Saved place chip should respond to taps.", first.isClickable && second.isClickable)
+            }
+            assertEquals("12.50000000", latitude.text.toString())
+            assertEquals("44.25000000", longitude.text.toString())
+        } finally {
+            instrumentation.runOnMainSync {
+                val prefs = activity.getPreferences(Context.MODE_PRIVATE)
+                val editor = prefs.edit()
+                if (hadFavorites) editor.putString("favorites", previousFavorites) else editor.remove("favorites")
+                editor.commit()
+                activity.javaClass.getDeclaredMethod("refreshSavedPlacesStrip").apply { isAccessible = true }.invoke(activity)
+                activity.finish()
+            }
+        }
+    }
+
+    @Test
     fun nativeMapLoadsAndTapSelectsAValidCoordinate() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
+        instrumentation.uiAutomation.grantRuntimePermission(context.packageName, Manifest.permission.ACCESS_FINE_LOCATION)
         val launcher = context.packageManager.getLaunchIntentForPackage(context.packageName)
             ?: error("Location Lab launcher activity was not found.")
         val activity = instrumentation.startActivitySync(launcher.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
@@ -34,6 +81,12 @@ class MockLocationRoundTripTest {
             ?: error("Latitude input was not added to the screen.")
         val longitude = root.findViewWithTag("longitude-input") as? EditText
             ?: error("Longitude input was not added to the screen.")
+        val zoomIn = root.findViewWithTag("zoom-in") as? View
+            ?: error("The visible zoom-in control was not added to the screen.")
+        val detailsToggle = root.findViewWithTag("details-toggle") as? View
+            ?: error("The expandable location controls were not added to the screen.")
+        val detailsGroup = root.findViewWithTag("extra-location-controls") as? View
+            ?: error("The extra location controls were not added to the screen.")
         try {
             val readyDeadline = SystemClock.elapsedRealtime() + 30_000L
             while (SystemClock.elapsedRealtime() < readyDeadline &&
@@ -41,6 +94,25 @@ class MockLocationRoundTripTest {
             ) Thread.sleep(250L)
             assertTrue("OpenStreetMap style and tile map should finish loading.",
                 map.contentDescription?.toString()?.contains("ready", ignoreCase = true) == true)
+            assertEquals("The default map panel should stay compact.", View.GONE, detailsGroup.visibility)
+            instrumentation.runOnMainSync { detailsToggle.performClick() }
+            assertEquals("The panel toggle should reveal saved-place and status controls.", View.VISIBLE, detailsGroup.visibility)
+            instrumentation.runOnMainSync { detailsToggle.performClick() }
+            assertEquals("The panel toggle should collapse the extra controls again.", View.GONE, detailsGroup.visibility)
+
+            var zoomBefore = 0.0
+            instrumentation.runOnMainSync {
+                val mapField = activity.javaClass.getDeclaredField("map").apply { isAccessible = true }
+                zoomBefore = (mapField.get(activity) as org.maplibre.android.maps.MapLibreMap).cameraPosition.zoom
+                zoomIn.performClick()
+            }
+            Thread.sleep(900L)
+            var zoomAfter = 0.0
+            instrumentation.runOnMainSync {
+                val mapField = activity.javaClass.getDeclaredField("map").apply { isAccessible = true }
+                zoomAfter = (mapField.get(activity) as org.maplibre.android.maps.MapLibreMap).cameraPosition.zoom
+            }
+            assertTrue("The on-screen + control should zoom the native map in.", zoomAfter > zoomBefore)
 
             instrumentation.runOnMainSync {
                 val x = map.width / 2f

@@ -2,13 +2,17 @@
 
 A small Android mock-location utility for testing location-aware apps on a device you control. It uses Android's official mock-provider APIs and keeps an ongoing notification while active.
 
+GitHub: [Bhaveek08/AndroidLocationSpoofer](https://github.com/Bhaveek08/AndroidLocationSpoofer).
+
 ## Features
 
 - Search for an address or place with Android's geocoder, or enter latitude and longitude directly.
 - Save a **Home** coordinate and load it again with one tap.
 - Save and reopen up to 20 named places.
 - Preview a selected coordinate in an installed map app.
-- Explore an interactive MapLibre map with separate blue last-real and teal mock markers; pan and zoom use native Android map gestures.
+- Open directly on the device's fresh real-location fix when permission is granted, with the last verified real fix as an offline fallback.
+- Use the full-screen MapLibre map with a blue halo around the real fix, a distinct teal target pin, large zoom buttons, pinch/double-tap zoom, and one-tap recentering.
+- Pick Home or any saved place directly from the visible horizontal place rail; collapse the control sheet to make more room for the map.
 - Search result labels and map detail depend on OpenStreetMap coverage and Android's device geocoder; verify important coordinates before use.
 - Choose the reported accuracy (5 m, 15 m, or 50 m).
 - Start a foreground session that refreshes GPS and network test providers every five seconds.
@@ -45,4 +49,4 @@ The test APK install can reset the selected mock app on some devices. The comman
 
 The `ACCESS_MOCK_LOCATION` permission is included only in the debug APK. The debug APK is created at `app/build/outputs/apk/debug/app-debug.apk`.
 
-Pushing a version tag such as `v0.2.0` runs the release workflow and publishes the verified debug APK to GitHub Releases. This project currently distributes a debug build because no signing key is stored in the repository.
+Pushing a version tag such as `v0.3.0` runs the release workflow and publishes the verified debug APK to GitHub Releases. This project currently distributes a debug build because no signing key is stored in the repository.
