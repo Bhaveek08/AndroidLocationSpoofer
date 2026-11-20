@@ -6,6 +6,9 @@ import android.content.Intent
 import android.location.LocationManager
 import android.os.Build
 import android.os.SystemClock
+import android.view.MotionEvent
+import android.view.View
+import android.widget.EditText
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import java.util.concurrent.CountDownLatch
@@ -17,6 +20,51 @@ import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class MockLocationRoundTripTest {
+    @Test
+    fun nativeMapLoadsAndTapSelectsAValidCoordinate() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val context = instrumentation.targetContext
+        val launcher = context.packageManager.getLaunchIntentForPackage(context.packageName)
+            ?: error("Location Lab launcher activity was not found.")
+        val activity = instrumentation.startActivitySync(launcher.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        val root = activity.window.decorView
+        val map = root.findViewWithTag("location-map") as? View
+            ?: error("The interactive map was not added to the screen.")
+        val latitude = root.findViewWithTag("latitude-input") as? EditText
+            ?: error("Latitude input was not added to the screen.")
+        val longitude = root.findViewWithTag("longitude-input") as? EditText
+            ?: error("Longitude input was not added to the screen.")
+        try {
+            val readyDeadline = SystemClock.elapsedRealtime() + 30_000L
+            while (SystemClock.elapsedRealtime() < readyDeadline &&
+                map.contentDescription?.toString()?.contains("ready", ignoreCase = true) != true
+            ) Thread.sleep(250L)
+            assertTrue("OpenStreetMap style and tile map should finish loading.",
+                map.contentDescription?.toString()?.contains("ready", ignoreCase = true) == true)
+
+            instrumentation.runOnMainSync {
+                val x = map.width / 2f
+                val y = map.height / 2f
+                val down = MotionEvent.obtain(SystemClock.uptimeMillis(), SystemClock.uptimeMillis(), MotionEvent.ACTION_DOWN, x, y, 0)
+                val up = MotionEvent.obtain(SystemClock.uptimeMillis() + 80, SystemClock.uptimeMillis() + 80, MotionEvent.ACTION_UP, x, y, 0)
+                map.dispatchTouchEvent(down)
+                map.dispatchTouchEvent(up)
+                down.recycle()
+                up.recycle()
+            }
+            val tapDeadline = SystemClock.elapsedRealtime() + 5_000L
+            while (SystemClock.elapsedRealtime() < tapDeadline && (latitude.text.isBlank() || longitude.text.isBlank())) {
+                Thread.sleep(200L)
+            }
+            val lat = latitude.text.toString().toDoubleOrNull()
+            val lon = longitude.text.toString().toDoubleOrNull()
+            assertTrue("Map tap should select a valid latitude.", lat != null && lat in -90.0..90.0)
+            assertTrue("Map tap should select a valid longitude.", lon != null && lon in -180.0..180.0)
+        } finally {
+            instrumentation.runOnMainSync { activity.finish() }
+        }
+    }
+
     @Test
     fun androidReturnsTheInjectedMockGpsAndNetworkFix() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()

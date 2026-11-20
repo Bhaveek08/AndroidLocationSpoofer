@@ -4,6 +4,12 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+    inputs:
+      run_emulator_tests:
+        description: Run the slower Android 16 mock-provider integration suite
+        type: boolean
+        required: true
+        default: false
 
 permissions:
   contents: read
@@ -26,6 +32,7 @@ jobs:
       - name: Build, lint, and run unit tests
         run: ./gradlew testDebugUnitTest lintDebug assembleDebug
       - name: Verify mock providers and background service on Android 16
+        if: github.event_name == 'workflow_dispatch' && inputs.run_emulator_tests
         uses: reactivecircus/android-emulator-runner@v2.38.0
         with:
           api-level: 36

@@ -1,0 +1,16 @@
+{
+  "version": 8,
+  "sources": {
+    "openstreetmap": {
+      "type": "raster",
+      "tiles": ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
+      "tileSize": 256,
+      "maxzoom": 19,
+      "attribution": "© OpenStreetMap contributors"
+    }
+  },
+  "layers": [
+    { "id": "background", "type": "background", "paint": { "background-color": "#E7EFEC" } },
+    { "id": "openstreetmap-raster", "type": "raster", "source": "openstreetmap", "minzoom": 0, "maxzoom": 19 }
+  ]
+}

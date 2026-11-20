@@ -8,6 +8,8 @@ A small Android mock-location utility for testing location-aware apps on a devic
 - Save a **Home** coordinate and load it again with one tap.
 - Save and reopen up to 20 named places.
 - Preview a selected coordinate in an installed map app.
+- Explore an interactive MapLibre map with separate blue last-real and teal mock markers; pan and zoom use native Android map gestures.
+- Search result labels and map detail depend on OpenStreetMap coverage and Android's device geocoder; verify important coordinates before use.
 - Choose the reported accuracy (5 m, 15 m, or 50 m).
 - Start a foreground session that refreshes GPS and network test providers every five seconds.
 - Verify that Android returns the same coordinates to this app and identifies the fixes as mock locations.
@@ -39,6 +41,8 @@ adb shell appops set dev.codex.locationlab android:mock_location allow
 adb shell am instrument -w -r dev.codex.locationlab.test/androidx.test.runner.AndroidJUnitRunner
 ```
 
-The test APK install can reset the selected mock app on some devices. The commands above enable the mock-location app operation after both APKs are installed. The device tests inject a known coordinate through both Android providers, read both fixes back, check the mock flag and coordinates, verify the foreground service refreshes fixes in the background, and stop the service cleanly. CI runs the same tests on an Android 16 emulator.
+The test APK install can reset the selected mock app on some devices. The commands above enable the mock-location app operation after both APKs are installed. The device tests load and tap the native map, inject a known coordinate through both Android providers, read both fixes back, check the mock flag and coordinates, verify the foreground service refreshes fixes in the background, and stop the service cleanly. The quick CI workflow runs build, lint, and unit checks. The Android 16 emulator integration suite can be selected in the workflow's manual run options; a connected physical device is also supported.
 
 The `ACCESS_MOCK_LOCATION` permission is included only in the debug APK. The debug APK is created at `app/build/outputs/apk/debug/app-debug.apk`.
+
+Pushing a version tag such as `v0.2.0` runs the release workflow and publishes the verified debug APK to GitHub Releases. This project currently distributes a debug build because no signing key is stored in the repository.
