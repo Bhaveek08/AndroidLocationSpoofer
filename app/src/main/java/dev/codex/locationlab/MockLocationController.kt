@@ -1,8 +1,10 @@
 package dev.codex.locationlab
 
 import android.location.Location
+import android.location.LocationListener
 import android.location.LocationManager
 import android.os.Build
+import android.os.Looper
 import android.location.provider.ProviderProperties
 import android.Manifest
 import android.content.Context
@@ -11,13 +13,29 @@ import android.annotation.SuppressLint
 import android.os.SystemClock
 
 /** Writes real test-provider fixes through Android's mock-location API. */
-class MockLocationController(private val context: Context, private val manager: LocationManager) {
+class MockLocationController(
+    private val context: Context,
+    private val manager: LocationManager,
+    private val onVerified: (GeoPoint, Set<String>) -> Unit = { _, _ -> }
+) {
     private val providers = listOf(LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER)
+    private val listeners = mutableMapOf<String, LocationListener>()
+    private val lock = Any()
+    private var targetPoint: GeoPoint? = null
+    private var targetTimeMillis = 0L
+    private val verifiedProviders = mutableSetOf<String>()
+    private var completedTimeMillis = 0L
     private var registered = false
 
     fun inject(point: GeoPoint, accuracyMeters: Float = 5f) {
         if (context.checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
             throw SecurityException("Allow precise location so Android's mock fix can be verified.")
+        }
+        val injectionTime = System.currentTimeMillis()
+        synchronized(lock) {
+            targetPoint = point
+            targetTimeMillis = injectionTime
+            verifiedProviders.clear()
         }
         if (!registered) registerProviders()
         providers.forEach { provider ->
@@ -28,25 +46,23 @@ class MockLocationController(private val context: Context, private val manager: 
                 altitude = 0.0
                 speed = 0f
                 bearing = 0f
-                time = System.currentTimeMillis()
+                time = injectionTime
                 elapsedRealtimeNanos = SystemClock.elapsedRealtimeNanos()
             }
             manager.setTestProviderLocation(provider, fix)
-            val returned = manager.getLastKnownLocation(provider)
-                ?: throw IllegalStateException("Android did not return a fix from the $provider provider.")
-            @Suppress("DEPRECATION")
-            val isMock = if (Build.VERSION.SDK_INT >= 31) returned.isMock else returned.isFromMockProvider
-            if (!isMock ||
-                kotlin.math.abs(returned.latitude - point.latitude) > 0.000001 ||
-                kotlin.math.abs(returned.longitude - point.longitude) > 0.000001
-            ) {
-                throw IllegalStateException("Android returned a different or non-mock fix from $provider.")
-            }
         }
     }
 
     fun stop() {
         if (!registered) return
+        listeners.values.forEach { listener ->
+            try {
+                manager.removeUpdates(listener)
+            } catch (_: Exception) {
+                // Android may already have removed the listener with its provider.
+            }
+        }
+        listeners.clear()
         providers.forEach { provider ->
             try {
                 manager.setTestProviderEnabled(provider, false)
@@ -79,6 +95,45 @@ class MockLocationController(private val context: Context, private val manager: 
             }
             manager.setTestProviderEnabled(provider, true)
         }
+        if (context.checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+            throw SecurityException("Precise location permission was revoked during mock-provider setup.")
+        }
+        providers.forEach { provider ->
+            val listener = object : LocationListener {
+                override fun onLocationChanged(location: Location) {
+                    verifyProviderUpdate(provider, location)
+                }
+            }
+            listeners[provider] = listener
+            manager.requestLocationUpdates(provider, 0L, 0f, listener, Looper.getMainLooper())
+        }
+    }
+
+    private fun verifyProviderUpdate(provider: String, location: Location) {
+        val snapshot = synchronized(lock) {
+            val point = targetPoint ?: return
+            if (location.time < targetTimeMillis) return
+            point to targetTimeMillis
+        }
+        val expected = snapshot.first
+        @Suppress("DEPRECATION")
+        val isMock = if (Build.VERSION.SDK_INT >= 31) location.isMock else location.isFromMockProvider
+        if (!isMock ||
+            kotlin.math.abs(location.latitude - expected.latitude) > 0.000001 ||
+            kotlin.math.abs(location.longitude - expected.longitude) > 0.000001
+        ) return
+
+        val completion = synchronized(lock) {
+            if (targetPoint != expected || targetTimeMillis != snapshot.second) return
+            verifiedProviders += provider
+            if (verifiedProviders.containsAll(providers) && completedTimeMillis != targetTimeMillis) {
+                completedTimeMillis = targetTimeMillis
+                expected to verifiedProviders.toSet()
+            } else {
+                null
+            }
+        }
+        completion?.let { (point, confirmedProviders) -> onVerified(point, confirmedProviders) }
     }
 
     @Suppress("DEPRECATION")

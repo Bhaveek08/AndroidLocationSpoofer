@@ -20,12 +20,19 @@ class MockLocationService : Service() {
     private var point: GeoPoint? = null
     private var accuracyMeters: Float = 5f
     private var preserveError = false
+    private val firstFixTimeout = Runnable {
+        val currentState = getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY_STATE, "")
+        if (currentState != "active") {
+            preserveError = true
+            state("error", "Android accepted the provider setup but did not deliver a verified GPS and network fix within 30 seconds.", 0L)
+            stopSelf()
+        }
+    }
     private val ticker = object : Runnable {
         override fun run() {
             val target = point ?: return
             try {
                 controller?.inject(target, accuracyMeters)
-                state("active", "Android returned a mock fix for ${target.latitude}, ${target.longitude}", System.currentTimeMillis())
                 handler.postDelayed(this, UPDATE_INTERVAL_MS)
             } catch (failure: Exception) {
                 preserveError = true
@@ -52,19 +59,32 @@ class MockLocationService : Service() {
             return START_NOT_STICKY
         }
 
+        controller?.stop()
+        handler.removeCallbacks(firstFixTimeout)
         point = GeoPoint(lat, lon)
         accuracyMeters = intent.getFloatExtra(EXTRA_ACCURACY, 5f).coerceIn(1f, 1000f)
         createNotificationChannel()
         startForeground(NOTIFICATION_ID, buildNotification(point!!))
-        controller = MockLocationController(this, getSystemService(Context.LOCATION_SERVICE) as LocationManager)
+        controller = MockLocationController(this, getSystemService(Context.LOCATION_SERVICE) as LocationManager) { verifiedPoint, verifiedProviders ->
+            if (point == verifiedPoint) {
+                handler.removeCallbacks(firstFixTimeout)
+                state(
+                    "active",
+                    "Android delivered a mock fix for ${verifiedPoint.latitude}, ${verifiedPoint.longitude} through ${verifiedProviders.joinToString()}.",
+                    System.currentTimeMillis()
+                )
+            }
+        }
         state("starting", "Starting Android mock providers…", 0L)
         handler.removeCallbacks(ticker)
         handler.post(ticker)
+        handler.postDelayed(firstFixTimeout, FIRST_FIX_TIMEOUT_MS)
         return START_NOT_STICKY
     }
 
     override fun onDestroy() {
         handler.removeCallbacks(ticker)
+        handler.removeCallbacks(firstFixTimeout)
         try {
             controller?.stop()
         } finally {
@@ -78,6 +98,7 @@ class MockLocationService : Service() {
 
     private fun stopSession() {
         handler.removeCallbacks(ticker)
+        handler.removeCallbacks(firstFixTimeout)
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
@@ -138,5 +159,6 @@ class MockLocationService : Service() {
         private const val CHANNEL_ID = "mock_location"
         private const val NOTIFICATION_ID = 42
         private const val UPDATE_INTERVAL_MS = 5_000L
+        private const val FIRST_FIX_TIMEOUT_MS = 30_000L
     }
 }

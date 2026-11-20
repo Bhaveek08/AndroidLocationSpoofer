@@ -34,9 +34,11 @@ Use JDK 17 or newer and Android SDK Platform 36. From this directory:
 On a connected phone, first install the debug APK and select Location Lab as the mock app. Then run:
 
 ```powershell
-./gradlew.bat connectedDebugAndroidTest
+./gradlew.bat installDebug installDebugAndroidTest
+adb shell appops set dev.codex.locationlab android:mock_location allow
+adb shell am instrument -w -r dev.codex.locationlab.test/androidx.test.runner.AndroidJUnitRunner
 ```
 
-The device test injects a known coordinate through both Android providers, reads both fixes back, checks the mock flag and coordinates, and removes the providers in `finally`. It requires Location Lab to be selected as the device's mock app.
+The test APK install can reset the selected mock app on some devices. The commands above enable the mock-location app operation after both APKs are installed. The device tests inject a known coordinate through both Android providers, read both fixes back, check the mock flag and coordinates, verify the foreground service refreshes fixes in the background, and stop the service cleanly. CI runs the same tests on an Android 16 emulator.
 
-The debug APK is created at `app/build/outputs/apk/debug/app-debug.apk`.
+The `ACCESS_MOCK_LOCATION` permission is included only in the debug APK. The debug APK is created at `app/build/outputs/apk/debug/app-debug.apk`.
