@@ -187,7 +187,7 @@ class MainActivity : Activity() {
         MapLibre.getInstance(this)
         httpClient = routeClient.newBuilder().addInterceptor { chain ->
                 chain.proceed(chain.request().newBuilder()
-                    .header("User-Agent", "GeoShift/0.7.0 (+https://github.com/Bhaveek08/AndroidLocationSpoofer)")
+                    .header("User-Agent", "GeoShift/0.8.0 (+https://github.com/Bhaveek08/AndroidLocationSpoofer)")
                     .build())
             }.build()
         HttpRequestUtil.setOkHttpClient(httpClient)
@@ -596,26 +596,90 @@ class MainActivity : Activity() {
     private fun showMoreOptions() {
         val options = arrayOf(
             "Save selected point as Home", "Save selected place", "Set mock accuracy",
-            "Developer setup", "Open in map app", "Export saved places", "Import saved places"
+            "Privacy checkup", "Developer setup", "Open in map app", "Export saved places", "Import saved places"
         )
         AlertDialog.Builder(this).setTitle("More options").setItems(options) { _, which ->
             when (which) {
                 0 -> saveHome()
                 1 -> addFavorite()
                 2 -> showAccuracyPicker()
-                3 -> openDeveloperOptions()
-                4 -> openMapPreview()
-                5 -> startActivityForResult(Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+                3 -> showPrivacyCheckup()
+                4 -> openDeveloperOptions()
+                5 -> openMapPreview()
+                6 -> startActivityForResult(Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
                     addCategory(Intent.CATEGORY_OPENABLE)
                     type = "application/json"
                     putExtra(Intent.EXTRA_TITLE, "GeoShift-saved-places.json")
                 }, REQUEST_EXPORT_PLACES)
-                6 -> startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                7 -> startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
                     addCategory(Intent.CATEGORY_OPENABLE)
                     type = "application/json"
                 }, REQUEST_IMPORT_PLACES)
             }
         }.show()
+    }
+
+    private fun showPrivacyCheckup() {
+        val locationManager = getSystemService(Context.LOCATION_SERVICE) as LocationManager
+        val locationEnabled = if (Build.VERSION.SDK_INT >= 28) locationManager.isLocationEnabled else {
+            locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER) || locationManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER)
+        }
+        val precise = checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        val approximate = checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        val mockEnabled = isSelectedMockApp()
+        val session = getSharedPreferences(MockLocationService.PREFS, Context.MODE_PRIVATE)
+        val spoofActive = session.getString(MockLocationService.KEY_STATE, "stopped") == "active"
+        val checks = listOf(
+            "GeoShift permission: ${if (precise) "precise" else if (approximate) "approximate" else "not granted"}",
+            "Android Location: ${if (locationEnabled) "on" else "off"}",
+            "GeoShift selected for mock location: ${if (mockEnabled) "yes" else "no"}",
+            "Mock session: ${if (spoofActive) "active" else "stopped"}",
+            "Real-location marker: ${if (realLocation == null) "unavailable" else "saved fix · ${realFixAgeLabel()}"}"
+        )
+        val message = buildString {
+            checks.forEach { append("• ").append(it).append('\n') }
+            append("\nGeoShift changes Android mock GPS/network fixes only. Apps may detect mock fixes or use Wi‑Fi, cell, cached, account, or network location. This checkup cannot verify or falsify those sources. Review location permission and sharing separately in Android and Google settings.")
+        }
+        val settingsActions = arrayOf(
+            "Android Location settings",
+            "Installed app settings",
+            "GeoShift app permissions",
+            "Google Account location controls"
+        )
+        AlertDialog.Builder(this)
+            .setTitle("Privacy checkup")
+            .setMessage(message)
+            .setItems(settingsActions) { _, which ->
+                when (which) {
+                    0 -> openLocationSettings()
+                    1 -> openInstalledAppSettings()
+                    2 -> openAppSettings()
+                    3 -> openGoogleAccountLocationControls()
+                }
+            }
+            .setPositiveButton("Done", null)
+            .show()
+    }
+
+    private fun openLocationSettings() {
+        runCatching { startActivity(Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS)) }
+            .onFailure { showStatus("Settings unavailable", "Open Android Settings and search for Location.") }
+    }
+
+    private fun openAppSettings() {
+        val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName"))
+        runCatching { startActivity(intent) }
+            .onFailure { showStatus("Settings unavailable", "Open GeoShift's App info page in Android Settings.") }
+    }
+
+    private fun openInstalledAppSettings() {
+        runCatching { startActivity(Intent(Settings.ACTION_APPLICATION_SETTINGS)) }
+            .onFailure { showStatus("Settings unavailable", "Open Android Settings, then review Location access under Apps.") }
+    }
+
+    private fun openGoogleAccountLocationControls() {
+        runCatching { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://myaccount.google.com/data-and-privacy"))) }
+            .onFailure { showStatus("Google settings unavailable", "Open Google Account settings and review Location History and Location Sharing.") }
     }
 
     private fun exportSavedPlaces(uri: Uri) {

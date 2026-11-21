@@ -26,6 +26,7 @@ GitHub: [Bhaveek08/AndroidLocationSpoofer](https://github.com/Bhaveek08/AndroidL
 - Verify that Android returns the same coordinates to this app and identifies the fixes as mock locations.
 - Stop from the app or from the persistent notification.
 - Reject invalid coordinates and surface Android permission/provider errors in the status panel.
+- Open the read-only Privacy checkup for GeoShift permission, Android Location, mock-app selection, mock-session, and saved real-fix status, with shortcuts to Android app/location settings and Google Account location controls. It cannot inspect or override other apps' independent Wi-Fi, cell, cached, account, or network signals.
 
 ## Requirements and setup
 
@@ -56,4 +57,4 @@ The test APK install can reset the selected mock app on some devices. The comman
 
 The `ACCESS_MOCK_LOCATION` permission is included only in the debug APK. The debug APK is created at `app/build/outputs/apk/debug/app-debug.apk`.
 
-Pushing a version tag such as `v0.7.0` runs the release workflow and publishes the verified debug APK to GitHub Releases. This project currently distributes a debug build because no signing key is stored in the repository.
+Pushing a version tag such as `v0.8.0` runs the release workflow and publishes the verified debug APK to GitHub Releases. This project currently distributes a debug build because no signing key is stored in the repository.

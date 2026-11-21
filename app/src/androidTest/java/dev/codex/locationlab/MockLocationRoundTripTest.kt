@@ -24,6 +24,35 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 class MockLocationRoundTripTest {
     @Test
+    fun privacyCheckupReportsLimitsAndCanBeDismissed() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val context = instrumentation.targetContext
+        val launcher = context.packageManager.getLaunchIntentForPackage(context.packageName)
+            ?: error("GeoShift launcher activity was not found.")
+        val activity = instrumentation.startActivitySync(launcher.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        try {
+            instrumentation.runOnMainSync {
+                activity.javaClass.getDeclaredMethod("showPrivacyCheckup").apply { isAccessible = true }.invoke(activity)
+            }
+            val ui = instrumentation.uiAutomation
+            val deadline = SystemClock.uptimeMillis() + 5_000L
+            var foundWarning = false
+            while (SystemClock.uptimeMillis() < deadline && !foundWarning) {
+                val root = ui.rootInActiveWindow
+                foundWarning = root?.let {
+                    it.findAccessibilityNodeInfosByText("Privacy checkup").isNotEmpty() &&
+                        it.findAccessibilityNodeInfosByText("GeoShift changes Android mock GPS/network fixes only.").isNotEmpty()
+                } == true
+                if (!foundWarning) SystemClock.sleep(100L)
+            }
+            assertTrue("Privacy checkup should explain Android mock-location limits.", foundWarning)
+            instrumentation.sendKeyDownUpSync(android.view.KeyEvent.KEYCODE_BACK)
+        } finally {
+            instrumentation.runOnMainSync { activity.finish() }
+        }
+    }
+
+    @Test
     fun mapTapModeClearlySwitchesBetweenSpoofAndDestination() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
