@@ -6,15 +6,16 @@ GitHub: [Bhaveek08/AndroidLocationSpoofer](https://github.com/Bhaveek08/AndroidL
 
 ## Features
 
-- Search for an address or place with Android's geocoder, or enter latitude and longitude directly.
+- Search for a place with debounced suggestions from Android's geocoder, or enter latitude and longitude directly. Search text is sent to the device geocoding provider as you type.
 - Save a **Home** coordinate and load it again with one tap.
 - Save and reopen up to 20 named places.
 - Export or restore Home and saved places as a user-chosen JSON file. Real-location history is excluded from backups.
 - Preview a selected coordinate in an installed map app.
 - Open directly on the device's fresh real-location fix when permission is granted, with the last verified real fix as an offline fallback.
-- Use a full-screen dark vector map with readable roads and labels, a blue real-location dot, a coral target pin, quick-zoom gestures, large zoom buttons, and smooth recentering.
+- Use a full-screen dark vector map with readable roads and labels, a blue last-real-fix dot, a coral spoof target, a separate gold route destination, quick-zoom gestures, large zoom buttons, and smooth recentering.
+- Switch map-tap mode between choosing the spoof point and choosing a directions destination. Search suggestions place the selected result on the map using the active mode.
 - Keep the blue marker pinned to the last verified real fix during mock mode, with its age displayed; starting a session waits for a fresh non-mock fix first.
-- Find driving directions in the app from the last saved real fix or a typed address/coordinate, view the highlighted route, and scroll through turn instructions.
+- Plan a driving route in the app from the last saved real fix or a typed address/coordinate, view the highlighted route, and scroll through turn instructions. This is route planning, not live turn-by-turn navigation: Android mock providers prevent this app from independently reading an unmocked live GPS feed while spoofing is active.
 - Route lookups send the selected start and destination to the public OSRM routing service; the app displays OpenStreetMap/OSRM credit and labels public routing as best effort.
 - Home, saved places, and the cached real fix are stored in app-private on-device preferences; Android app backup is disabled. GeoShift does not automatically upload those saved coordinates. Online map tiles reveal the displayed map area to OpenFreeMap, address lookups use Android's geocoder, and directions ask before sending route locations to external services. Export is user-initiated.
 - Pick Home or any saved place from the coordinate-labeled card rail; long-press a card to rename or remove it, and swipe the sheet to expand or collapse controls.
@@ -55,4 +56,4 @@ The test APK install can reset the selected mock app on some devices. The comman
 
 The `ACCESS_MOCK_LOCATION` permission is included only in the debug APK. The debug APK is created at `app/build/outputs/apk/debug/app-debug.apk`.
 
-Pushing a version tag such as `v0.6.0` runs the release workflow and publishes the verified debug APK to GitHub Releases. This project currently distributes a debug build because no signing key is stored in the repository.
+Pushing a version tag such as `v0.7.0` runs the release workflow and publishes the verified debug APK to GitHub Releases. This project currently distributes a debug build because no signing key is stored in the repository.

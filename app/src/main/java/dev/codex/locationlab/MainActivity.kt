@@ -34,6 +34,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.view.animation.OvershootInterpolator
 import android.widget.ArrayAdapter
+import android.widget.AutoCompleteTextView
 import android.widget.Button
 import android.widget.EditText
 import android.widget.FrameLayout
@@ -112,7 +113,8 @@ class MainActivity : Activity() {
     private val geocoderExecutor = Executors.newSingleThreadExecutor()
     private val routeClient = OkHttpClient.Builder().callTimeout(25, TimeUnit.SECONDS).build()
     private lateinit var httpClient: OkHttpClient
-    private lateinit var addressInput: EditText
+    private lateinit var addressInput: AutoCompleteTextView
+    private lateinit var mapPickModeButton: TextView
     private lateinit var latitudeInput: EditText
     private lateinit var longitudeInput: EditText
     private lateinit var statusView: TextView
@@ -134,7 +136,13 @@ class MainActivity : Activity() {
     private var currentSource: GeoJsonSource? = null
     private var mockSource: GeoJsonSource? = null
     private var routeSource: GeoJsonSource? = null
+    private var destinationSource: GeoJsonSource? = null
     private var currentRoute: DirectionsRoute? = null
+    private var routeDestination: GeoPoint? = null
+    private var mapPickMode = MapPickMode.SPOOF
+    private var suggestionGeneration = 0
+    private var suggestionTask: Runnable? = null
+    private var suppressPlaceSuggestions = false
     private var activeRouteCall: Call? = null
     private var routeLookupGeneration = 0
     private var mockPinLayer: SymbolLayer? = null
@@ -179,7 +187,7 @@ class MainActivity : Activity() {
         MapLibre.getInstance(this)
         httpClient = routeClient.newBuilder().addInterceptor { chain ->
                 chain.proceed(chain.request().newBuilder()
-                    .header("User-Agent", "GeoShift/0.6.0 (+https://github.com/Bhaveek08/AndroidLocationSpoofer)")
+                    .header("User-Agent", "GeoShift/0.7.0 (+https://github.com/Bhaveek08/AndroidLocationSpoofer)")
                     .build())
             }.build()
         HttpRequestUtil.setOkHttpClient(httpClient)
@@ -279,8 +287,10 @@ class MainActivity : Activity() {
                     currentSource = GeoJsonSource(SOURCE_CURRENT, FeatureCollection.fromFeatures(emptyArray()))
                     mockSource = GeoJsonSource(SOURCE_MOCK, FeatureCollection.fromFeatures(emptyArray()))
                     routeSource = GeoJsonSource(SOURCE_ROUTE, FeatureCollection.fromFeatures(emptyArray()))
+                    destinationSource = GeoJsonSource(SOURCE_DESTINATION, FeatureCollection.fromFeatures(emptyArray()))
                     style.addSource(currentSource!!)
                     style.addSource(routeSource!!)
+                    style.addSource(destinationSource!!)
                     style.addSource(mockSource!!)
                     style.addLayer(LineLayer("directions-route-layer", SOURCE_ROUTE).withProperties(
                         lineColor("#59D8B9"), lineWidth(5f), lineOpacity(0.94f)
@@ -294,6 +304,12 @@ class MainActivity : Activity() {
                     style.addLayer(CircleLayer("mock-location-halo", SOURCE_MOCK).withProperties(
                         circleRadius(18f), circleColor(0x33E86F56), circleStrokeColor(0x77E86F56), circleStrokeWidth(2f)
                     ))
+                    style.addLayer(CircleLayer("route-destination-halo", SOURCE_DESTINATION).withProperties(
+                        circleRadius(17f), circleColor(0x33FFD166.toInt()), circleStrokeColor(0xCCFFD166.toInt()), circleStrokeWidth(2f)
+                    ))
+                    style.addLayer(CircleLayer("route-destination-pin", SOURCE_DESTINATION).withProperties(
+                        circleRadius(8f), circleColor(0xFFFFD166.toInt()), circleStrokeColor(Color.WHITE), circleStrokeWidth(3f)
+                    ))
                     style.addImage(MOCK_ICON, createMockPin())
                     mockPinLayer = SymbolLayer("mock-location-layer", SOURCE_MOCK).withProperties(
                         iconImage(MOCK_ICON), iconSize(1f), iconAnchor(Property.ICON_ANCHOR_BOTTOM), iconAllowOverlap(true), iconIgnorePlacement(true)
@@ -305,15 +321,16 @@ class MainActivity : Activity() {
                     runCatching { GeoPoint.parse(latitudeInput.text.toString(), longitudeInput.text.toString()) }.getOrNull()?.let { point ->
                         mockSource?.setGeoJson(Feature.fromGeometry(Point.fromLngLat(point.longitude, point.latitude)))
                     }
+                    routeDestination?.let(::updateDestinationPin)
                     mapLibre.addOnMapClickListener { point ->
                         val selected = GeoPoint(point.latitude, point.longitude)
-                        suppressMapSync = true
-                        latitudeInput.setText(formatCoordinate(selected.latitude))
-                        longitudeInput.setText(formatCoordinate(selected.longitude))
-                        suppressMapSync = false
-                        updateMockPin(selected)
                         mapView.performHapticFeedback(android.view.HapticFeedbackConstants.KEYBOARD_TAP)
-                        showStatus("Map point selected", "${formatCoordinate(point.latitude)}, ${formatCoordinate(point.longitude)}")
+                        if (mapPickMode == MapPickMode.DESTINATION) {
+                            setRouteDestination(selected, "Map pin")
+                        } else {
+                            selectSpoofPoint(selected)
+                            showStatus("Spoof point selected", "${formatCoordinate(point.latitude)}, ${formatCoordinate(point.longitude)}")
+                        }
                         true
                     }
                     syncMapToFields()
@@ -325,13 +342,26 @@ class MainActivity : Activity() {
         }
         root.addView(mapView, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
 
-        addressInput = edit("Search a city, address or place").apply {
+        addressInput = AutoCompleteTextView(this).apply {
             tag = "address-input"
             textSize = 15f
             background = android.graphics.drawable.ColorDrawable(Color.TRANSPARENT)
             setPadding(dp(12), dp(8), dp(4), dp(8))
             imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_SEARCH
+            threshold = 2
+            setSingleLine(true)
+            setTextColor(UiPalette.ink)
+            setHintTextColor(UiPalette.muted)
+            setAdapter(ArrayAdapter<PlaceSuggestion>(this@MainActivity, android.R.layout.simple_dropdown_item_1line, mutableListOf()))
+            addTextChangedListener(object : TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) { if (!suppressPlaceSuggestions) schedulePlaceSuggestions(s?.toString().orEmpty(), this@apply) }
+                override fun afterTextChanged(s: Editable?) = Unit
+            })
             setOnEditorActionListener { _, _, _ -> searchAddress(); true }
+            setOnItemClickListener { parent, _, position, _ ->
+                (parent.getItemAtPosition(position) as? PlaceSuggestion)?.let(::selectSearchSuggestion)
+            }
         }
         val searchRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -371,6 +401,10 @@ class MainActivity : Activity() {
             orientation = LinearLayout.VERTICAL
             addView(brandRow, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(10) })
             addView(searchRow)
+            mapPickModeButton = actionChip("Tap: spoof", UiPalette.surfaceRaised, UiPalette.primaryDeep, onClick = {
+                setMapPickMode(if (mapPickMode == MapPickMode.SPOOF) MapPickMode.DESTINATION else MapPickMode.SPOOF)
+            }).apply { tag = "map-pick-mode"; contentDescription = "Toggle map taps between spoof target and directions destination" }
+            addView(mapPickModeButton, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(42)).apply { topMargin = dp(8) })
         }
         root.addView(topOverlay, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP).apply {
             setMargins(dp(16), dp(12), dp(16), 0)
@@ -983,6 +1017,86 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun schedulePlaceSuggestions(query: String, input: AutoCompleteTextView) {
+        suggestionTask?.let(handler::removeCallbacks)
+        val requestId = ++suggestionGeneration
+        val normalized = query.trim()
+        if (normalized.length < 2 || parseCoordinateQuery(normalized) != null || !Geocoder.isPresent()) {
+            input.dismissDropDown()
+            (input.adapter as? ArrayAdapter<PlaceSuggestion>)?.clear()
+            return
+        }
+        val task = Runnable {
+            geocoderExecutor.execute {
+                val results = runCatching {
+                    @Suppress("DEPRECATION")
+                    Geocoder(this, Locale.getDefault()).getFromLocationName(normalized, 5).orEmpty()
+                        .mapNotNull { address ->
+                            if (!address.hasLatitude() || !address.hasLongitude()) null else PlaceSuggestion(
+                                address.getAddressLine(0) ?: listOfNotNull(address.locality, address.adminArea, address.countryName).joinToString(", "),
+                                GeoPoint(address.latitude, address.longitude)
+                            )
+                        }.distinctBy { it.point }
+                }.getOrDefault(emptyList())
+                runOnUiThread {
+                    if (requestId != suggestionGeneration || isFinishing || input.text.toString().trim() != normalized) return@runOnUiThread
+                    val adapter = input.adapter as? ArrayAdapter<PlaceSuggestion> ?: return@runOnUiThread
+                    adapter.clear()
+                    adapter.addAll(results)
+                    adapter.notifyDataSetChanged()
+                    if (results.isNotEmpty() && input.hasFocus()) input.showDropDown() else input.dismissDropDown()
+                }
+            }
+        }
+        suggestionTask = task
+        handler.postDelayed(task, 420L)
+    }
+
+    private fun selectSearchSuggestion(suggestion: PlaceSuggestion) {
+        suppressPlaceSuggestions = true
+        addressInput.setText(suggestion.label)
+        suppressPlaceSuggestions = false
+        if (mapPickMode == MapPickMode.DESTINATION) {
+            setRouteDestination(suggestion.point, suggestion.label)
+        } else {
+            selectSpoofPoint(suggestion.point)
+            showStatus("Spoof point selected", suggestion.label)
+        }
+        addressInput.dismissDropDown()
+        map?.animateCamera(CameraUpdateFactory.newLatLngZoom(LatLng(suggestion.point.latitude, suggestion.point.longitude), 15.0), 520)
+    }
+
+    private fun selectSpoofPoint(point: GeoPoint) {
+        suppressMapSync = true
+        latitudeInput.setText(formatCoordinate(point.latitude))
+        longitudeInput.setText(formatCoordinate(point.longitude))
+        suppressMapSync = false
+        updateMockPin(point)
+    }
+
+    private fun setMapPickMode(mode: MapPickMode) {
+        mapPickMode = mode
+        if (::mapPickModeButton.isInitialized) {
+            mapPickModeButton.text = if (mode == MapPickMode.SPOOF) "Tap: spoof" else "Tap: destination"
+            mapPickModeButton.setTextColor(if (mode == MapPickMode.SPOOF) UiPalette.primaryDeep else 0xFFFFD166.toInt())
+            mapPickModeButton.contentDescription = if (mode == MapPickMode.SPOOF) "Map taps set the spoof location. Tap to switch to destination selection." else "Map taps set the directions destination. Tap to switch to spoof location selection."
+        }
+        showStatus(if (mode == MapPickMode.SPOOF) "Spoof target mode" else "Directions destination mode", if (mode == MapPickMode.SPOOF) "Tap the map to move the coral spoof marker." else "Tap the map or search to set the gold route destination marker.")
+    }
+
+    private fun setRouteDestination(point: GeoPoint, label: String) {
+        routeDestination = point
+        updateDestinationPin(point)
+        map?.animateCamera(CameraUpdateFactory.newLatLngZoom(LatLng(point.latitude, point.longitude), 15.0), 480)
+        showStatus("Destination selected", "$label · ${formatCoordinate(point.latitude)}, ${formatCoordinate(point.longitude)}")
+    }
+
+    private fun updateDestinationPin(point: GeoPoint?) {
+        val source = destinationSource ?: return
+        if (point == null) source.setGeoJson(FeatureCollection.fromFeatures(emptyArray()))
+        else source.setGeoJson(Feature.fromGeometry(Point.fromLngLat(point.longitude, point.latitude)))
+    }
+
     private fun showDirectionsDialog() {
         val content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -993,7 +1107,30 @@ class MainActivity : Activity() {
             setText("My location")
             setSelection(text.length)
         }
-        val destinationInput = edit("Destination or coordinates").apply { tag = "directions-destination" }
+        val destinationInput = AutoCompleteTextView(this).apply {
+            tag = "directions-destination"
+            hint = "Destination or coordinates"
+            setTextColor(UiPalette.ink)
+            setHintTextColor(UiPalette.muted)
+            setPadding(dp(14), 0, dp(14), 0)
+            background = rounded(UiPalette.surfaceRaised, 14, UiPalette.outline)
+            threshold = 2
+            setSingleLine(true)
+            imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_SEARCH
+            setAdapter(ArrayAdapter<PlaceSuggestion>(this@MainActivity, android.R.layout.simple_dropdown_item_1line, mutableListOf()))
+            addTextChangedListener(object : TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) { schedulePlaceSuggestions(s?.toString().orEmpty(), this@apply) }
+                override fun afterTextChanged(s: Editable?) = Unit
+            })
+            setOnItemClickListener { parent, _, position, _ ->
+                (parent.getItemAtPosition(position) as? PlaceSuggestion)?.let { suggestion ->
+                    setText("${suggestion.point.latitude}, ${suggestion.point.longitude}")
+                    setRouteDestination(suggestion.point, suggestion.label)
+                }
+            }
+            routeDestination?.let { setText("${it.latitude}, ${it.longitude}") }
+        }
         content.addView(text("START", 10f, UiPalette.muted, bold = true), margin(bottom = 4))
         content.addView(originInput, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(52)))
         content.addView(text("DESTINATION", 10f, UiPalette.muted, bold = true), margin(top = 12, bottom = 4))
@@ -1187,10 +1324,10 @@ class MainActivity : Activity() {
             .setTitle("Choose a result")
             .setItems(labels) { _, which ->
                 val result = results[which]
-                latitudeInput.setText(formatCoordinate(result.latitude))
-                longitudeInput.setText(formatCoordinate(result.longitude))
-                addressInput.setText(result.getAddressLine(0) ?: addressInput.text)
-                showStatus("Location selected", labels[which].replace("\n", " · "))
+                val title = result.getAddressLine(0) ?: listOfNotNull(result.locality, result.countryName).joinToString(", ")
+                val suggestion = PlaceSuggestion(title, GeoPoint(result.latitude, result.longitude))
+                addressInput.setText(title)
+                selectSearchSuggestion(suggestion)
             }
             .setNegativeButton("Cancel", null)
             .show()
@@ -1773,6 +1910,10 @@ class MainActivity : Activity() {
     }
 
     private data class SavedPlace(val name: String, val point: GeoPoint)
+    private data class PlaceSuggestion(val label: String, val point: GeoPoint) {
+        override fun toString() = label
+    }
+    private enum class MapPickMode { SPOOF, DESTINATION }
 
     companion object {
         private const val REQUEST_PERMISSIONS = 70
@@ -1795,7 +1936,8 @@ class MainActivity : Activity() {
         private const val SOURCE_CURRENT = "current-location-source"
         private const val SOURCE_MOCK = "mock-location-source"
         private const val SOURCE_ROUTE = "directions-route-source"
-        private const val MOCK_ICON = "mock-location-pin"
+        private const val SOURCE_DESTINATION = "route-destination-source"
+    private const val MOCK_ICON = "mock-location-pin"
         private const val CURRENT_LOCATION_TIMEOUT_MS = 20_000L
     }
 }

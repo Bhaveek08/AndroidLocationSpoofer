@@ -24,6 +24,26 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 class MockLocationRoundTripTest {
     @Test
+    fun mapTapModeClearlySwitchesBetweenSpoofAndDestination() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val context = instrumentation.targetContext
+        val launcher = context.packageManager.getLaunchIntentForPackage(context.packageName)
+            ?: error("GeoShift launcher activity was not found.")
+        val activity = instrumentation.startActivitySync(launcher.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        val toggle = activity.window.decorView.findViewWithTag("map-pick-mode") as? android.widget.TextView
+            ?: error("The map tap-mode control was not shown.")
+        try {
+            assertTrue(toggle.text.toString().contains("spoof", ignoreCase = true))
+            instrumentation.runOnMainSync { toggle.performClick() }
+            assertTrue("The second mode should clearly select a directions destination.", toggle.text.toString().contains("destination", ignoreCase = true))
+            instrumentation.runOnMainSync { toggle.performClick() }
+            assertTrue("The control should switch back to spoof target selection.", toggle.text.toString().contains("spoof", ignoreCase = true))
+        } finally {
+            instrumentation.runOnMainSync { activity.finish() }
+        }
+    }
+
+    @Test
     fun spoofControlIsOneToggleWithClearOnAndOffStates() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
