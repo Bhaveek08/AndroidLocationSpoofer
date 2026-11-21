@@ -51,6 +51,7 @@ import org.maplibre.android.maps.MapLibreMap
 import org.maplibre.android.maps.Style
 import org.maplibre.android.module.http.HttpRequestUtil
 import org.maplibre.android.style.layers.CircleLayer
+import org.maplibre.android.style.layers.LineLayer
 import org.maplibre.android.style.layers.Property
 import org.maplibre.android.style.layers.SymbolLayer
 import org.maplibre.android.style.layers.PropertyFactory.circleColor
@@ -63,11 +64,19 @@ import org.maplibre.android.style.layers.PropertyFactory.iconAnchor
 import org.maplibre.android.style.layers.PropertyFactory.iconIgnorePlacement
 import org.maplibre.android.style.layers.PropertyFactory.iconImage
 import org.maplibre.android.style.layers.PropertyFactory.iconSize
+import org.maplibre.android.style.layers.PropertyFactory.lineColor
+import org.maplibre.android.style.layers.PropertyFactory.lineOpacity
+import org.maplibre.android.style.layers.PropertyFactory.lineWidth
 import org.maplibre.android.style.sources.GeoJsonSource
 import org.maplibre.geojson.Feature
 import org.maplibre.geojson.FeatureCollection
 import org.maplibre.geojson.Point
+import org.maplibre.geojson.LineString
 import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.Call
+import okhttp3.Callback
+import okhttp3.Response
 import android.text.Editable
 import android.text.TextWatcher
 import org.json.JSONArray
@@ -76,6 +85,8 @@ import java.text.DateFormat
 import java.util.Locale
 import java.io.ByteArrayOutputStream
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.io.IOException
 
 private object UiPalette {
     val canvas = 0xFF0B1114.toInt()
@@ -99,6 +110,8 @@ private object UiPalette {
 class MainActivity : Activity() {
     private val handler = Handler(Looper.getMainLooper())
     private val geocoderExecutor = Executors.newSingleThreadExecutor()
+    private val routeClient = OkHttpClient.Builder().callTimeout(25, TimeUnit.SECONDS).build()
+    private lateinit var httpClient: OkHttpClient
     private lateinit var addressInput: EditText
     private lateinit var latitudeInput: EditText
     private lateinit var longitudeInput: EditText
@@ -112,6 +125,7 @@ class MainActivity : Activity() {
     private lateinit var locationSheet: LinearLayout
     private lateinit var placesStrip: LinearLayout
     private lateinit var savedPlacesTitle: TextView
+    private lateinit var realLocationLegend: TextView
     private lateinit var mapStatusChip: TextView
     private lateinit var mapAttribution: TextView
     private lateinit var mapZoomControls: LinearLayout
@@ -119,12 +133,19 @@ class MainActivity : Activity() {
     private var map: MapLibreMap? = null
     private var currentSource: GeoJsonSource? = null
     private var mockSource: GeoJsonSource? = null
+    private var routeSource: GeoJsonSource? = null
+    private var currentRoute: DirectionsRoute? = null
+    private var activeRouteCall: Call? = null
+    private var routeLookupGeneration = 0
     private var mockPinLayer: SymbolLayer? = null
     private var currentHaloLayer: CircleLayer? = null
     private var pendingStart = false
+    private var pendingStartForFreshFix = false
     private var pendingLocate = false
     private var resumed = false
     private var realLocation: GeoPoint? = null
+    private var realLocationFixTimeMs = 0L
+    private var realLocationAccuracyMeters: Float? = null
     private var currentLocationListener: LocationListener? = null
     private val currentLocationCancellations = mutableListOf<android.os.CancellationSignal>()
     private var locationRequestGeneration = 0
@@ -136,8 +157,12 @@ class MainActivity : Activity() {
     private val currentLocationTimeout = Runnable {
         locationLookupActive = false
         stopCurrentLocationUpdates()
-        if (realLocation == null) showStatus("Location not found", "Check that Android Location is on, then try again.")
-        else showStatus("Showing last real fix", "Couldn't refresh your location. Tap the target button to retry.")
+        if (pendingStartForFreshFix) {
+            pendingStartForFreshFix = false
+            setSpoofButton("stopped")
+            showStatus("Real fix unavailable", "Start was not sent. Check Android Location, then retry so the blue marker is saved before mock mode.")
+        } else if (realLocation == null) showStatus("Location not found", "Check that Android Location is on, then try again.")
+        else showStatus("Showing last real fix", "Couldn't refresh. The blue marker is ${realFixAgeLabel()}; stop mock mode before getting a new real fix.")
     }
 
     private val statusPoll = object : Runnable {
@@ -152,13 +177,12 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         MapLibre.getInstance(this)
-        HttpRequestUtil.setOkHttpClient(
-            OkHttpClient.Builder().addInterceptor { chain ->
+        httpClient = routeClient.newBuilder().addInterceptor { chain ->
                 chain.proceed(chain.request().newBuilder()
-                    .header("User-Agent", "GeoShift/0.5.1 (+https://github.com/Bhaveek08/AndroidLocationSpoofer)")
+                    .header("User-Agent", "GeoShift/0.6.0 (+https://github.com/Bhaveek08/AndroidLocationSpoofer)")
                     .build())
             }.build()
-        )
+        HttpRequestUtil.setOkHttpClient(httpClient)
         mapView = MapView(this)
         mapView.onCreate(savedInstanceState)
         realLocation = loadLastRealLocation()
@@ -172,6 +196,7 @@ class MainActivity : Activity() {
         resumed = true
         if (::mapView.isInitialized) mapView.onResume()
         refreshStatus()
+        if (pendingStartForFreshFix) locateCurrentLocation()
     }
 
     override fun onPause() {
@@ -187,6 +212,8 @@ class MainActivity : Activity() {
         handler.removeCallbacks(debouncedMapSync)
         handler.removeCallbacks(currentLocationTimeout)
         stopCurrentLocationUpdates()
+        routeClient.dispatcher.cancelAll()
+        activeRouteCall = null
         if (::mapView.isInitialized) mapView.onDestroy()
         geocoderExecutor.shutdownNow()
         super.onDestroy()
@@ -251,8 +278,13 @@ class MainActivity : Activity() {
                     contentDescription = "Interactive dark map ready. Tap to choose a mock location."
                     currentSource = GeoJsonSource(SOURCE_CURRENT, FeatureCollection.fromFeatures(emptyArray()))
                     mockSource = GeoJsonSource(SOURCE_MOCK, FeatureCollection.fromFeatures(emptyArray()))
+                    routeSource = GeoJsonSource(SOURCE_ROUTE, FeatureCollection.fromFeatures(emptyArray()))
                     style.addSource(currentSource!!)
+                    style.addSource(routeSource!!)
                     style.addSource(mockSource!!)
+                    style.addLayer(LineLayer("directions-route-layer", SOURCE_ROUTE).withProperties(
+                        lineColor("#59D8B9"), lineWidth(5f), lineOpacity(0.94f)
+                    ))
                     currentHaloLayer = CircleLayer("current-location-halo", SOURCE_CURRENT).withProperties(
                         circleRadius(22f), circleColor(0x333478E5), circleStrokeColor(0x553478E5), circleStrokeWidth(1f)
                     ).also(style::addLayer)
@@ -286,6 +318,7 @@ class MainActivity : Activity() {
                     }
                     syncMapToFields()
                     realLocation?.let { updateCurrentPin(it) }
+                    currentRoute?.let(::renderRouteOnMap)
                 }
             }
             isClickable = true
@@ -315,6 +348,9 @@ class MainActivity : Activity() {
         searchRow.addView(searchIcon, LinearLayout.LayoutParams(dp(34), dp(48)).apply { gravity = Gravity.CENTER_VERTICAL; marginStart = dp(4) })
         searchRow.addView(addressInput, LinearLayout.LayoutParams(0, dp(48), 1f))
         searchRow.addView(actionChip("Search", UiPalette.primary, Color.WHITE) { searchAddress() }, LinearLayout.LayoutParams(dp(78), dp(48)))
+        searchRow.addView(actionChip("Route", UiPalette.surfaceRaised, UiPalette.ink, iconResource = R.drawable.ic_directions) {
+            showDirectionsDialog()
+        }.apply { tag = "directions-button" }, LinearLayout.LayoutParams(dp(82), dp(48)).apply { marginStart = dp(6) })
 
         val brandRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
         val brand = text("GEOSHIFT", 12f, Color.WHITE, bold = true).apply {
@@ -439,7 +475,9 @@ class MainActivity : Activity() {
 
         val legend = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
         legend.addView(colorDot(UiPalette.current), LinearLayout.LayoutParams(dp(9), dp(9)))
-        legend.addView(text("Real location", 11f, UiPalette.muted, bold = true), LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginStart = dp(5) })
+        realLocationLegend = text("Real · waiting", 11f, UiPalette.muted, bold = true).apply { tag = "real-location-age" }
+        legend.addView(realLocationLegend, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginStart = dp(5) })
+        updateRealLocationLegend()
         legend.addView(colorDot(UiPalette.target), LinearLayout.LayoutParams(dp(9), dp(9)).apply { marginStart = dp(14) })
         legend.addView(text("Mock target", 11f, UiPalette.muted, bold = true), LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginStart = dp(5) })
 
@@ -763,7 +801,7 @@ class MainActivity : Activity() {
             .getString(MockLocationService.KEY_STATE, "stopped")
         if (sessionState == "active" || sessionState == "starting") {
             locationLookupActive = false
-            showStatus("Mock session is active", "Stop mock mode before refreshing the blue real-location marker.")
+            showStatus("Mock session is active", realLocationSnapshotDetail())
             return
         }
         val manager = getSystemService(Context.LOCATION_SERVICE) as LocationManager
@@ -790,7 +828,11 @@ class MainActivity : Activity() {
         stopCurrentLocationUpdates()
         val requestId = ++locationRequestGeneration
         locationLookupActive = true
-        showStatus("Finding your location…", "Centering the map on a fresh non-mock fix.")
+        if (pendingStartForFreshFix) {
+            showStatus("Waiting for your real fix…", "Saving a fresh non-mock location before starting mock mode.")
+        } else {
+            showStatus("Finding your location…", "Centering the map on a fresh non-mock fix.")
+        }
         try {
             val listener = object : LocationListener {
                 override fun onLocationChanged(location: Location) {
@@ -842,24 +884,71 @@ class MainActivity : Activity() {
         if (isMock || !location.latitude.isFinite() || !location.longitude.isFinite()) return
         val point = GeoPoint(location.latitude, location.longitude)
         realLocation = point
-        hasFreshRealFix = System.currentTimeMillis() - location.time <= FRESH_FIX_AGE_MS
+        realLocationFixTimeMs = location.time
+        realLocationAccuracyMeters = if (location.hasAccuracy()) location.accuracy else null
+        hasFreshRealFix = System.currentTimeMillis() - location.time in 0..FRESH_FIX_AGE_MS
         getPreferences(Context.MODE_PRIVATE).edit()
             .putString(KEY_LAST_REAL_LAT, point.latitude.toString())
             .putString(KEY_LAST_REAL_LON, point.longitude.toString())
+            .putLong(KEY_LAST_REAL_TIME, realLocationFixTimeMs)
+            .putFloat(KEY_LAST_REAL_ACCURACY, realLocationAccuracyMeters ?: -1f)
             .apply()
         updateCurrentPin(point)
+        updateRealLocationLegend()
         showStatus(
             if (hasFreshRealFix) "You are here" else "Showing last location",
-            (if (hasFreshRealFix) "Fresh real fix" else "Recent real fix") + " · ${formatCoordinate(point.latitude)}, ${formatCoordinate(point.longitude)}"
+            (if (hasFreshRealFix) "Fresh real fix" else "Recent real fix") + " · ±${realLocationAccuracyMeters?.let { formatRouteDistance(it.toDouble()) } ?: "unknown accuracy"} · ${formatCoordinate(point.latitude)}, ${formatCoordinate(point.longitude)}"
         )
-        stopCurrentLocationUpdates()
+        if (!pendingStartForFreshFix || hasFreshRealFix) stopCurrentLocationUpdates()
+        if (pendingStartForFreshFix && hasFreshRealFix) {
+            pendingStartForFreshFix = false
+            handler.post { if (!isFinishing) startSession() }
+        }
     }
 
     private fun loadLastRealLocation(): GeoPoint? {
         val prefs = getPreferences(Context.MODE_PRIVATE)
         val latitude = prefs.getString(KEY_LAST_REAL_LAT, null)?.toDoubleOrNull() ?: return null
         val longitude = prefs.getString(KEY_LAST_REAL_LON, null)?.toDoubleOrNull() ?: return null
-        return runCatching { GeoPoint.parse(latitude.toString(), longitude.toString()) }.getOrNull()
+        val point = runCatching { GeoPoint.parse(latitude.toString(), longitude.toString()) }.getOrNull() ?: return null
+        realLocationFixTimeMs = prefs.getLong(KEY_LAST_REAL_TIME, 0L)
+        realLocationAccuracyMeters = prefs.getFloat(KEY_LAST_REAL_ACCURACY, -1f).takeIf { it >= 0f }
+        hasFreshRealFix = realLocationFixTimeMs > 0L && System.currentTimeMillis() - realLocationFixTimeMs in 0..FRESH_FIX_AGE_MS
+        return point
+    }
+
+    private fun realFixAgeLabel(): String {
+        if (realLocationFixTimeMs <= 0L) return "an undated saved fix"
+        val age = (System.currentTimeMillis() - realLocationFixTimeMs).coerceAtLeast(0L)
+        return when {
+            age < 60_000L -> "${(age / 1_000L).coerceAtLeast(1L)} sec ago"
+            age < 3_600_000L -> "${age / 60_000L} min ago"
+            age < 86_400_000L -> "${age / 3_600_000L} hr ago"
+            else -> "${age / 86_400_000L} days ago"
+        }
+    }
+
+    private fun shortRealFixAge(): String {
+        val age = (System.currentTimeMillis() - realLocationFixTimeMs).coerceAtLeast(0L)
+        return when {
+            realLocationFixTimeMs <= 0L -> "age ?"
+            age < 60_000L -> "${(age / 1_000L).coerceAtLeast(1L)}s"
+            age < 3_600_000L -> "${age / 60_000L}m"
+            age < 86_400_000L -> "${age / 3_600_000L}h"
+            else -> "${age / 86_400_000L}d"
+        }
+    }
+
+    private fun realLocationSnapshotDetail(): String = if (realLocation == null) {
+        "No real fix was saved before mock mode. Android only returns the mock fix while it is active; stop spoofing to find your real location."
+    } else {
+        "Blue marker is your last verified real fix (${realFixAgeLabel()}); live real GPS is unavailable while Android's mock providers are active."
+    }
+
+    private fun updateRealLocationLegend() {
+        if (!::realLocationLegend.isInitialized) return
+        realLocationLegend.text = if (realLocation == null) "Real · unavailable" else "Real · ${realFixAgeLabel()}"
+        realLocationLegend.contentDescription = realLocationSnapshotDetail()
     }
 
     private fun hasLocationPermission() =
@@ -892,6 +981,201 @@ class MainActivity : Activity() {
                 runOnUiThread { showStatus("Search failed", failure.localizedMessage ?: "Check your connection and try again.") }
             }
         }
+    }
+
+    private fun showDirectionsDialog() {
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(8), dp(20), dp(4))
+        }
+        val originInput = edit("Start location or coordinates").apply {
+            tag = "directions-origin"
+            setText("My location")
+            setSelection(text.length)
+        }
+        val destinationInput = edit("Destination or coordinates").apply { tag = "directions-destination" }
+        content.addView(text("START", 10f, UiPalette.muted, bold = true), margin(bottom = 4))
+        content.addView(originInput, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(52)))
+        content.addView(text("DESTINATION", 10f, UiPalette.muted, bold = true), margin(top = 12, bottom = 4))
+        content.addView(destinationInput, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(52)))
+        content.addView(
+            text("My location uses your last verified real fix. Before searching, GeoShift will ask before sending route locations to external services.", 11f, UiPalette.muted),
+            margin(top = 12)
+        )
+        AlertDialog.Builder(this)
+            .setTitle("Directions")
+            .setView(content)
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Find route") { _, _ -> requestDirections(originInput.text.toString().trim(), destinationInput.text.toString().trim()) }
+            .show()
+    }
+
+    private fun requestDirections(originQuery: String, destinationQuery: String) {
+        if (originQuery.isBlank() || destinationQuery.isBlank()) {
+            showStatus("Enter both locations", "Add a start and destination to find a route.")
+            return
+        }
+        if (originQuery.equals("My location", ignoreCase = true) && realLocation == null) {
+            showStatus("Real location unavailable", "Stop mock mode and wait for a real fix, or enter a start address or coordinates.")
+            return
+        }
+        if (!Geocoder.isPresent() && (originQuery.containsLetters() || destinationQuery.containsLetters())) {
+            showStatus("Address search unavailable", "Enter coordinates as latitude, longitude on this device.")
+            return
+        }
+
+        AlertDialog.Builder(this)
+            .setTitle("Send locations for directions?")
+            .setMessage("Finding this route may send the start and destination to Android's geocoder and the public OSRM routing service. If you chose My location, that is your last saved real fix. Continue only if you want to share these locations for this request.")
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Send and find route") { _, _ -> lookupDirections(originQuery, destinationQuery) }
+            .show()
+    }
+
+    private fun lookupDirections(originQuery: String, destinationQuery: String) {
+        activeRouteCall?.cancel()
+        val requestId = ++routeLookupGeneration
+        showStatus("Finding directions…", "Resolving both locations and requesting an in-app route.")
+        geocoderExecutor.execute {
+            val resolved = runCatching {
+                resolveRoutePoint(originQuery, allowMyLocation = true) to
+                    resolveRoutePoint(destinationQuery, allowMyLocation = false)
+            }
+            resolved.onFailure { failure ->
+                runOnUiThread {
+                    if (requestId == routeLookupGeneration && !isFinishing) {
+                        showStatus("Could not find a location", failure.message ?: "Try a more specific address or coordinates.")
+                    }
+                }
+            }.onSuccess { (origin, destination) ->
+                val coordinates = String.format(
+                    Locale.US,
+                    "%.6f,%.6f;%.6f,%.6f",
+                    origin.longitude, origin.latitude, destination.longitude, destination.latitude
+                )
+                val url = "$ROUTING_BASE_URL/route/v1/driving/$coordinates?steps=true&alternatives=false&overview=full&geometries=geojson"
+                val request = Request.Builder().url(url).get().build()
+                activeRouteCall = httpClient.newCall(request).also { call ->
+                    call.enqueue(object : Callback {
+                        override fun onFailure(call: Call, failure: IOException) {
+                            runOnUiThread {
+                                if (requestId == routeLookupGeneration && !isFinishing) {
+                                    showStatus("Route unavailable", failure.localizedMessage ?: "Check your connection and try again.")
+                                }
+                            }
+                        }
+
+                        override fun onResponse(call: Call, response: Response) {
+                            val parsed = response.use {
+                                runCatching {
+                                    if (!it.isSuccessful) throw IOException("Routing service returned HTTP ${it.code}.")
+                                    DirectionsRouteParser.parse(it.body?.string().orEmpty())
+                                }
+                            }
+                            runOnUiThread {
+                                if (requestId != routeLookupGeneration || isFinishing) return@runOnUiThread
+                                parsed.onSuccess { route ->
+                                    showRouteOnMap(route)
+                                    showRouteStepsDialog(route)
+                                    showStatus("Route ready", "${formatRouteDistance(route.distanceMeters)} · ${formatRouteDuration(route.durationSeconds)} · shown on the map")
+                                }.onFailure { failure ->
+                                    showStatus("No route found", failure.message ?: "Try a different start or destination.")
+                                }
+                            }
+                        }
+                    })
+                }
+            }
+        }
+    }
+
+    private fun resolveRoutePoint(query: String, allowMyLocation: Boolean): GeoPoint {
+        if (allowMyLocation && (query.equals("My location", true) || query.equals("Current location", true))) {
+            return realLocation ?: error("No verified real location is saved. Stop mock mode or enter a start location.")
+        }
+        parseCoordinateQuery(query)?.let { return it }
+        @Suppress("DEPRECATION")
+        val results = Geocoder(this, Locale.getDefault()).getFromLocationName(query, 1).orEmpty()
+        val address = results.firstOrNull() ?: error("No address match for “$query”. Try a more specific address.")
+        return GeoPoint(address.latitude, address.longitude)
+    }
+
+    private fun parseCoordinateQuery(query: String): GeoPoint? {
+        val match = Regex("^\\s*(-?\\d+(?:\\.\\d+)?)\\s*[, ]\\s*(-?\\d+(?:\\.\\d+)?)\\s*$").matchEntire(query) ?: return null
+        return runCatching { GeoPoint.parse(match.groupValues[1], match.groupValues[2]) }.getOrNull()
+    }
+
+    private fun String.containsLetters() = any(Char::isLetter)
+
+    private fun showRouteOnMap(route: DirectionsRoute) {
+        currentRoute = route
+        renderRouteOnMap(route)
+    }
+
+    private fun renderRouteOnMap(route: DirectionsRoute) {
+        if (route.points.size < 2) return
+        routeSource?.setGeoJson(Feature.fromGeometry(LineString.fromLngLats(
+            route.points.map { point -> Point.fromLngLat(point.longitude, point.latitude) }
+        )))
+        val bounds = org.maplibre.android.geometry.LatLngBounds.Builder().apply {
+            route.points.forEach { include(LatLng(it.latitude, it.longitude)) }
+        }.build()
+        map?.animateCamera(CameraUpdateFactory.newLatLngBounds(bounds, dp(64)), 650)
+    }
+
+    private fun showRouteStepsDialog(route: DirectionsRoute) {
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(18), dp(8), dp(18), dp(4))
+        }
+        content.addView(text(
+            "${formatRouteDistance(route.distanceMeters)}  ·  ${formatRouteDuration(route.durationSeconds)}  ·  Driving",
+            15f, UiPalette.primaryDeep, bold = true
+        ), margin(bottom = 10))
+        val steps = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        if (route.steps.isEmpty()) {
+            steps.addView(text("Follow the highlighted route to your destination.", 14f, UiPalette.ink))
+        } else {
+            route.steps.forEachIndexed { index, step ->
+                val row = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    setPadding(0, dp(8), 0, dp(8))
+                }
+                val number = text("${index + 1}", 12f, UiPalette.primaryDeep, bold = true).apply {
+                    gravity = Gravity.CENTER
+                    background = rounded(UiPalette.primaryContainer, 24)
+                }
+                row.addView(number, LinearLayout.LayoutParams(dp(32), dp(32)))
+                val textColumn = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+                textColumn.addView(text(step.instruction, 14f, UiPalette.ink, bold = true))
+                textColumn.addView(text(
+                    "${formatRouteDistance(step.distanceMeters)} · ${formatRouteDuration(step.durationSeconds)}",
+                    11f, UiPalette.muted
+                ), LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(3) })
+                row.addView(textColumn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginStart = dp(12) })
+                steps.addView(row)
+                if (index < route.steps.lastIndex) steps.addView(View(this).apply { setBackgroundColor(UiPalette.outline) }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1)))
+            }
+        }
+        val scroll = ScrollView(this).apply { isFillViewport = false; addView(steps) }
+        content.addView(scroll, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(360)))
+        content.addView(text("Route data © OpenStreetMap contributors · OSRM. Public routing is best effort; check road conditions and signs.", 10f, UiPalette.muted), margin(top = 10))
+        AlertDialog.Builder(this)
+            .setTitle("Directions")
+            .setView(content)
+            .setNeutralButton("Clear route") { _, _ -> clearRoute() }
+            .setPositiveButton("Done", null)
+            .show()
+    }
+
+    private fun clearRoute() {
+        routeLookupGeneration++
+        activeRouteCall?.cancel()
+        activeRouteCall = null
+        currentRoute = null
+        routeSource?.setGeoJson(FeatureCollection.fromFeatures(emptyArray()))
+        showStatus("Route cleared", "The directions line was removed from the map.")
     }
 
     private fun chooseAddress(results: List<Address>) {
@@ -947,6 +1231,14 @@ class MainActivity : Activity() {
                 .setPositiveButton("Open Location settings") { _, _ -> startActivity(Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS)) }
                 .setNegativeButton("Cancel", null)
                 .show()
+            return
+        }
+
+        if (!hasFreshRealFix) {
+            pendingStartForFreshFix = true
+            setSpoofButton("starting")
+            showStatus("Waiting for your real fix…", "GeoShift will save a fresh, non-mock location first. The blue marker then stays pinned to that fix while Android's mock providers are active.")
+            locateCurrentLocation()
             return
         }
 
@@ -1121,19 +1413,24 @@ class MainActivity : Activity() {
 
     private fun refreshStatus() {
         if (!::statusView.isInitialized) return
+        updateRealLocationLegend()
         val prefs = getSharedPreferences(MockLocationService.PREFS, Context.MODE_PRIVATE)
         when (prefs.getString(MockLocationService.KEY_STATE, "stopped")) {
             "active" -> {
                 setSpoofButton("active")
-                if (::mapStatusChip.isInitialized) mapStatusChip.text = "MOCK ACTIVE"
+                if (::mapStatusChip.isInitialized) {
+                    mapStatusChip.text = if (realLocation == null) "MOCK · NO REAL FIX" else "MOCK · REAL PIN ${shortRealFixAge()}"
+                    mapStatusChip.contentDescription = realLocationSnapshotDetail()
+                }
                 statusView.setText(R.string.status_mock_fix_title)
                 val timestamp = prefs.getLong(MockLocationService.KEY_UPDATED, 0L)
                 val formattedTime = if (timestamp > 0) DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.MEDIUM).format(timestamp) else ""
-                statusDetailView.text = getString(
+                val mockDetail = getString(
                     R.string.status_mock_fix_detail,
                     prefs.getString(MockLocationService.KEY_DETAIL, ""),
                     formattedTime
                 )
+                statusDetailView.text = "$mockDetail\n${realLocationSnapshotDetail()}"
                 statusView.setTextColor(UiPalette.primaryDeep)
             }
             "error" -> {
@@ -1149,18 +1446,26 @@ class MainActivity : Activity() {
                 showStatus("Starting…", prefs.getString(MockLocationService.KEY_DETAIL, "Setting up providers.") ?: "Setting up providers.")
             }
             else -> {
-                setSpoofButton("stopped")
                 val ready = isSelectedMockApp()
-                if (::mapStatusChip.isInitialized && !locationLookupActive) {
-                    mapStatusChip.text = when {
-                        hasFreshRealFix -> "REAL FIX READY"
-                        realLocation != null -> "LAST REAL FIX"
-                        else -> "LOCATION NEEDED"
+                if (pendingStartForFreshFix) {
+                    setSpoofButton("starting")
+                    statusView.text = "Waiting for your real fix"
+                    statusDetailView.text = "Mock mode has not started. Waiting for a fresh, non-mock location for the blue marker."
+                    statusView.setTextColor(UiPalette.warning)
+                    if (::mapStatusChip.isInitialized) mapStatusChip.text = "SAVING REAL FIX…"
+                } else {
+                    setSpoofButton("stopped")
+                    if (::mapStatusChip.isInitialized && !locationLookupActive) {
+                        mapStatusChip.text = when {
+                            hasFreshRealFix -> "REAL FIX READY"
+                            realLocation != null -> "LAST REAL FIX"
+                            else -> "LOCATION NEEDED"
+                        }
                     }
+                    statusView.text = if (ready) "Ready to start" else "Setup needed"
+                    statusDetailView.text = if (ready) "Choose a place, then tap Start spoofing." else "Select GeoShift in Developer options to enable Android mock providers."
+                    statusView.setTextColor(if (ready) UiPalette.primaryDeep else UiPalette.warning)
                 }
-                statusView.text = if (ready) "Ready to start" else "Setup needed"
-                statusDetailView.text = if (ready) "Choose a place, then tap Start spoofing." else "Select GeoShift in Developer options to enable Android mock providers."
-                statusView.setTextColor(if (ready) UiPalette.primaryDeep else UiPalette.warning)
             }
         }
         handler.removeCallbacks(statusPoll)
@@ -1168,6 +1473,13 @@ class MainActivity : Activity() {
     }
 
     private fun toggleSpoofing() {
+        if (pendingStartForFreshFix) {
+            pendingStartForFreshFix = false
+            stopCurrentLocationUpdates()
+            setSpoofButton("stopped")
+            showStatus("Start canceled", "The real-location lookup stopped before mock mode began.")
+            return
+        }
         val state = getSharedPreferences(MockLocationService.PREFS, Context.MODE_PRIVATE)
             .getString(MockLocationService.KEY_STATE, "stopped")
         if (state == "active" || state == "starting") stopSession() else startSession()
@@ -1216,12 +1528,15 @@ class MainActivity : Activity() {
         if (::mapStatusChip.isInitialized) {
             mapStatusChip.text = when (title) {
                 "Finding your location…" -> "Locating…"
+                "Waiting for your real fix…" -> "SAVING REAL FIX…"
                 "You are here", "Current location found" -> "REAL FIX READY"
                 "Showing last real fix" -> "LAST REAL FIX"
                 "Location not found", "Turn on Location" -> "LOCATION NEEDED"
                 "Map point selected", "Location selected", "Home loaded" -> "TARGET SET"
                 "Searching…" -> "SEARCHING…"
                 "Starting…" -> "STARTING…"
+                "Finding directions…" -> "ROUTE SEARCH…"
+                "Route ready" -> "ROUTE READY"
                 else -> mapStatusChip.text
             }
         }
@@ -1470,12 +1785,16 @@ class MainActivity : Activity() {
         private const val KEY_ACCURACY_INDEX = "accuracy_index"
         private const val KEY_LAST_REAL_LAT = "last_real_lat"
         private const val KEY_LAST_REAL_LON = "last_real_lon"
+        private const val KEY_LAST_REAL_TIME = "last_real_time"
+        private const val KEY_LAST_REAL_ACCURACY = "last_real_accuracy"
         private const val MAX_FAVORITES = 20
         private const val LAST_KNOWN_FIX_MAX_AGE_MS = 24 * 60 * 60 * 1000L
         private const val FRESH_FIX_AGE_MS = 60 * 1000L
         private const val DARK_MAP_STYLE_URL = "https://tiles.openfreemap.org/styles/dark"
+        private const val ROUTING_BASE_URL = "https://router.project-osrm.org"
         private const val SOURCE_CURRENT = "current-location-source"
         private const val SOURCE_MOCK = "mock-location-source"
+        private const val SOURCE_ROUTE = "directions-route-source"
         private const val MOCK_ICON = "mock-location-pin"
         private const val CURRENT_LOCATION_TIMEOUT_MS = 20_000L
     }

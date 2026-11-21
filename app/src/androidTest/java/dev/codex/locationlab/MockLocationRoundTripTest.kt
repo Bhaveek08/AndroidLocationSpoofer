@@ -262,6 +262,32 @@ class MockLocationRoundTripTest {
         }.isFailure)
     }
 
+    @Test
+    fun directionsParserKeepsGeoJsonCoordinatesAndTurnSteps() {
+        val fixture = """{
+            "code":"Ok",
+            "routes":[{
+                "distance":1250.0,
+                "duration":420.0,
+                "geometry":{"type":"LineString","coordinates":[[77.5946,12.9716],[77.6000,12.9750]]},
+                "legs":[{"steps":[
+                    {"distance":300.0,"duration":90.0,"name":"MG Road","maneuver":{"type":"depart","modifier":"straight"}},
+                    {"distance":950.0,"duration":330.0,"name":"Brigade Road","maneuver":{"type":"turn","modifier":"right"}},
+                    {"distance":0.0,"duration":0.0,"name":"","maneuver":{"type":"arrive"}}
+                ]}]
+            }]
+        }"""
+        val route = DirectionsRouteParser.parse(fixture)
+        assertEquals(2, route.points.size)
+        assertEquals(12.9716, route.points.first().latitude, 0.000001)
+        assertEquals(77.6000, route.points.last().longitude, 0.000001)
+        assertEquals(1250.0, route.distanceMeters, 0.0)
+        assertEquals(3, route.steps.size)
+        assertTrue(route.steps[0].instruction.contains("MG Road"))
+        assertTrue(route.steps[1].instruction.contains("right"))
+        assertEquals("Arrive at your destination", route.steps[2].instruction)
+    }
+
     private fun wakeDevice(instrumentation: android.app.Instrumentation) {
         instrumentation.uiAutomation.executeShellCommand("input keyevent KEYCODE_WAKEUP").close()
     }

@@ -13,11 +13,15 @@ GitHub: [Bhaveek08/AndroidLocationSpoofer](https://github.com/Bhaveek08/AndroidL
 - Preview a selected coordinate in an installed map app.
 - Open directly on the device's fresh real-location fix when permission is granted, with the last verified real fix as an offline fallback.
 - Use a full-screen dark vector map with readable roads and labels, a blue real-location dot, a coral target pin, quick-zoom gestures, large zoom buttons, and smooth recentering.
+- Keep the blue marker pinned to the last verified real fix during mock mode, with its age displayed; starting a session waits for a fresh non-mock fix first.
+- Find driving directions in the app from the last saved real fix or a typed address/coordinate, view the highlighted route, and scroll through turn instructions.
+- Route lookups send the selected start and destination to the public OSRM routing service; the app displays OpenStreetMap/OSRM credit and labels public routing as best effort.
+- Home, saved places, and the cached real fix are stored in app-private on-device preferences; Android app backup is disabled. GeoShift does not automatically upload those saved coordinates. Online map tiles reveal the displayed map area to OpenFreeMap, address lookups use Android's geocoder, and directions ask before sending route locations to external services. Export is user-initiated.
 - Pick Home or any saved place from the coordinate-labeled card rail; long-press a card to rename or remove it, and swipe the sheet to expand or collapse controls.
 - See which saved coordinate is selected, animate the target pin as it moves, and use one color-changing start/stop action with clear state feedback.
 - Map coverage is based on OpenStreetMap data served by OpenFreeMap; search result labels depend on Android's device geocoder. Verify important coordinates before use.
 - Choose the reported accuracy (5 m, 15 m, or 50 m).
-- Start a foreground session that refreshes GPS and network test providers every five seconds.
+- Start a foreground session that refreshes GPS and network test providers every second.
 - Verify that Android returns the same coordinates to this app and identifies the fixes as mock locations.
 - Stop from the app or from the persistent notification.
 - Reject invalid coordinates and surface Android permission/provider errors in the status panel.
@@ -51,4 +55,4 @@ The test APK install can reset the selected mock app on some devices. The comman
 
 The `ACCESS_MOCK_LOCATION` permission is included only in the debug APK. The debug APK is created at `app/build/outputs/apk/debug/app-debug.apk`.
 
-Pushing a version tag such as `v0.5.1` runs the release workflow and publishes the verified debug APK to GitHub Releases. This project currently distributes a debug build because no signing key is stored in the repository.
+Pushing a version tag such as `v0.6.0` runs the release workflow and publishes the verified debug APK to GitHub Releases. This project currently distributes a debug build because no signing key is stored in the repository.

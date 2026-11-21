@@ -125,7 +125,7 @@ class MockLocationService : Service() {
         return Notification.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_menu_mylocation)
             .setContentTitle("GeoShift is active")
-            .setContentText("${target.latitude}, ${target.longitude}")
+            .setContentText("Mock location is active")
             .setContentIntent(openApp)
             .setOngoing(true)
             .addAction(
@@ -158,7 +158,7 @@ class MockLocationService : Service() {
         const val KEY_UPDATED = "updated"
         private const val CHANNEL_ID = "mock_location"
         private const val NOTIFICATION_ID = 42
-        private const val UPDATE_INTERVAL_MS = 5_000L
+        private const val UPDATE_INTERVAL_MS = 1_000L
         private const val FIRST_FIX_TIMEOUT_MS = 30_000L
     }
 }
