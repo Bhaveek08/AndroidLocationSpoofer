@@ -24,6 +24,49 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 class MockLocationRoundTripTest {
     @Test
+    fun startButtonStartsAndVerifiesTheMockProviders() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val context = instrumentation.targetContext
+        instrumentation.uiAutomation.grantRuntimePermission(context.packageName, Manifest.permission.ACCESS_FINE_LOCATION)
+        if (Build.VERSION.SDK_INT >= 33) {
+            instrumentation.uiAutomation.grantRuntimePermission(context.packageName, Manifest.permission.POST_NOTIFICATIONS)
+        }
+        val launcher = context.packageManager.getLaunchIntentForPackage(context.packageName)
+            ?: error("GeoShift launcher activity was not found.")
+        val activity = instrumentation.startActivitySync(launcher.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        val prefs = context.getSharedPreferences(MockLocationService.PREFS, Context.MODE_PRIVATE)
+        val mockToggle = activity.window.decorView.findViewWithTag("spoof-toggle") as? android.widget.TextView
+            ?: error("The spoof toggle was not shown.")
+        try {
+            instrumentation.runOnMainSync {
+                activity.startService(Intent(context, MockLocationService::class.java).setAction(MockLocationService.ACTION_STOP))
+            }
+            assertEquals("The test must begin with mock mode stopped.", "stopped", waitForState(prefs, "stopped", 10_000L))
+            instrumentation.runOnMainSync {
+                activity.javaClass.getDeclaredField("hasFreshRealFix").apply { isAccessible = true }.setBoolean(activity, true)
+                (activity.window.decorView.findViewWithTag("latitude-input") as EditText).setText("37.4219983")
+                (activity.window.decorView.findViewWithTag("longitude-input") as EditText).setText("-122.084")
+            }
+            instrumentation.runOnMainSync { mockToggle.performClick() }
+            val startedState = waitForState(prefs, "active", 25_000L)
+            assertEquals(
+                "Start button did not activate both mock providers. Service detail: ${prefs.getString(MockLocationService.KEY_DETAIL, "")}",
+                "active",
+                startedState
+            )
+            assertEquals("Stop spoofing", mockToggle.contentDescription)
+            instrumentation.runOnMainSync { mockToggle.performClick() }
+            assertEquals("The same button should stop the session.", "stopped", waitForState(prefs, "stopped", 10_000L))
+        } finally {
+            val stop = Intent(context, MockLocationService::class.java).setAction(MockLocationService.ACTION_STOP)
+            instrumentation.runOnMainSync {
+                runCatching { activity.startService(stop) }
+                activity.finish()
+            }
+        }
+    }
+
+    @Test
     fun privacyCheckupReportsLimitsAndCanBeDismissed() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext

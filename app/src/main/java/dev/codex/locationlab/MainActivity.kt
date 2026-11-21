@@ -187,7 +187,7 @@ class MainActivity : Activity() {
         MapLibre.getInstance(this)
         httpClient = routeClient.newBuilder().addInterceptor { chain ->
                 chain.proceed(chain.request().newBuilder()
-                    .header("User-Agent", "GeoShift/0.8.0 (+https://github.com/Bhaveek08/AndroidLocationSpoofer)")
+                    .header("User-Agent", "GeoShift/0.9.0 (+https://github.com/Bhaveek08/AndroidLocationSpoofer)")
                     .build())
             }.build()
         HttpRequestUtil.setOkHttpClient(httpClient)
@@ -394,6 +394,12 @@ class MainActivity : Activity() {
             setPadding(dp(12), dp(8), dp(12), dp(8))
             background = rounded(0xF21B282D.toInt(), 20, UiPalette.outline)
             elevation = dp(4).toFloat()
+            isClickable = true
+            isFocusable = true
+            contentDescription = "Location status. Tap to open details."
+            setOnClickListener {
+                if (::detailsGroup.isInitialized && detailsGroup.visibility != View.VISIBLE) toggleDetails()
+            }
         }
         brandRow.addView(brand)
         brandRow.addView(mapStatusChip, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginStart = dp(8) })
@@ -1414,11 +1420,18 @@ class MainActivity : Activity() {
         }
         if (missing.isNotEmpty()) {
             pendingStart = true
+            showStatus("Location permission is needed", "Allow precise location so Android can verify the mock providers. Notification permission keeps the active-state notice visible.")
             requestPermissions(missing.toTypedArray(), REQUEST_PERMISSIONS)
             return
         }
         if (!isSelectedMockApp()) {
             showStatus("Select GeoShift as the mock app", "Open Developer options and choose GeoShift under Select mock location app.")
+            AlertDialog.Builder(this)
+                .setTitle("Select GeoShift as mock app")
+                .setMessage("Android only allows the selected mock-location app to set test provider locations.")
+                .setPositiveButton("Open Developer options") { _, _ -> openDeveloperOptions() }
+                .setNegativeButton("Later", null)
+                .show()
             return
         }
         val manager = getSystemService(Context.LOCATION_SERVICE) as LocationManager
@@ -1640,6 +1653,7 @@ class MainActivity : Activity() {
                 statusView.setText(R.string.status_mock_location_failed)
                 statusDetailView.text = prefs.getString(MockLocationService.KEY_DETAIL, "Check Developer options and permissions.")
                 statusView.setTextColor(UiPalette.error)
+                if (detailsGroup.visibility != View.VISIBLE) toggleDetails()
             }
             "starting" -> {
                 setSpoofButton("starting")
@@ -1733,13 +1747,26 @@ class MainActivity : Activity() {
                 "You are here", "Current location found" -> "REAL FIX READY"
                 "Showing last real fix" -> "LAST REAL FIX"
                 "Location not found", "Turn on Location" -> "LOCATION NEEDED"
+                "Location permission is needed" -> "ALLOW LOCATION"
+                "Select GeoShift as the mock app" -> "SELECT MOCK APP"
+                "Could not start" -> "START FAILED"
+                "Real fix unavailable" -> "NO FRESH FIX"
+                "Check the coordinates" -> "INVALID POINT"
                 "Map point selected", "Location selected", "Home loaded" -> "TARGET SET"
                 "Searching…" -> "SEARCHING…"
                 "Starting…" -> "STARTING…"
                 "Finding directions…" -> "ROUTE SEARCH…"
                 "Route ready" -> "ROUTE READY"
-                else -> mapStatusChip.text
+                else -> title.uppercase(Locale.getDefault()).take(20)
             }
+            mapStatusChip.contentDescription = "$title. Tap location status to see details."
+        }
+        val setupFailure = title in setOf(
+            "Location permission is needed", "Select GeoShift as the mock app", "Could not start",
+            "Real fix unavailable", "Could not find location", "Location not found", "Turn on Location"
+        )
+        if (setupFailure && ::detailsGroup.isInitialized && detailsGroup.visibility != View.VISIBLE) {
+            toggleDetails()
         }
     }
 

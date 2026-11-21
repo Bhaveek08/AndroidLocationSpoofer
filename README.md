@@ -57,4 +57,4 @@ The test APK install can reset the selected mock app on some devices. The comman
 
 The `ACCESS_MOCK_LOCATION` permission is included only in the debug APK. The debug APK is created at `app/build/outputs/apk/debug/app-debug.apk`.
 
-Pushing a version tag such as `v0.8.0` runs the release workflow and publishes the verified debug APK to GitHub Releases. This project currently distributes a debug build because no signing key is stored in the repository.
+Pushing a version tag such as `v0.9.0` runs the release workflow and publishes the verified debug APK to GitHub Releases. The APK is debug-signed on GitHub Actions; signatures can change between runners, so Android may reject an install-over update. Export saved places before uninstalling an older build if Android reports a signature conflict.
