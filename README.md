@@ -115,7 +115,9 @@ adb shell am instrument -w -r dev.codex.locationlab.test/androidx.test.runner.An
 
 Installing the test APK can reset the selected mock app on some devices, which is why the `appops`
 command above runs after both APKs are installed. Keep the phone awake and unlocked for the map
-tests. In CI, the same suite runs on an Android 16 emulator from the workflow's manual run options.
+tests. In CI, the same eleven tests run on an Android 16 emulator from the workflow's manual run
+options. `am instrument` exits 0 even when tests fail or the app process crashes, so the workflow
+also requires an OK summary with no failure markers before it counts the run as a pass.
 
 ## Releases
 
