@@ -35,7 +35,6 @@ import android.view.ViewGroup
 import android.view.animation.OvershootInterpolator
 import android.widget.ArrayAdapter
 import android.widget.AutoCompleteTextView
-import android.widget.Button
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.ImageButton
@@ -52,6 +51,7 @@ import org.maplibre.android.maps.MapLibreMap
 import org.maplibre.android.maps.Style
 import org.maplibre.android.module.http.HttpRequestUtil
 import org.maplibre.android.style.layers.CircleLayer
+import org.maplibre.android.style.layers.FillLayer
 import org.maplibre.android.style.layers.LineLayer
 import org.maplibre.android.style.layers.Property
 import org.maplibre.android.style.layers.SymbolLayer
@@ -60,6 +60,12 @@ import org.maplibre.android.style.layers.PropertyFactory.circleRadius
 import org.maplibre.android.style.layers.PropertyFactory.circleOpacity
 import org.maplibre.android.style.layers.PropertyFactory.circleStrokeColor
 import org.maplibre.android.style.layers.PropertyFactory.circleStrokeWidth
+import org.maplibre.android.style.layers.PropertyFactory.fillColor
+import org.maplibre.android.style.layers.PropertyFactory.fillOutlineColor
+import org.maplibre.android.style.layers.PropertyFactory.iconRotate
+import org.maplibre.android.style.layers.PropertyFactory.iconRotationAlignment
+import org.maplibre.android.style.layers.PropertyFactory.lineCap
+import org.maplibre.android.style.layers.PropertyFactory.lineJoin
 import org.maplibre.android.style.layers.PropertyFactory.iconAllowOverlap
 import org.maplibre.android.style.layers.PropertyFactory.iconAnchor
 import org.maplibre.android.style.layers.PropertyFactory.iconIgnorePlacement
@@ -73,6 +79,7 @@ import org.maplibre.geojson.Feature
 import org.maplibre.geojson.FeatureCollection
 import org.maplibre.geojson.Point
 import org.maplibre.geojson.LineString
+import org.maplibre.geojson.Polygon
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Call
@@ -129,6 +136,12 @@ class MainActivity : Activity() {
     private lateinit var savedPlacesTitle: TextView
     private lateinit var realLocationLegend: TextView
     private lateinit var mapStatusChip: TextView
+    private lateinit var driveHud: LinearLayout
+    private lateinit var driveHeadline: TextView
+    private lateinit var driveSubline: TextView
+    private lateinit var driveProgressFill: View
+    private lateinit var driveFollowChip: TextView
+    private lateinit var travelButton: TextView
     private lateinit var mapAttribution: TextView
     private lateinit var mapZoomControls: LinearLayout
     private lateinit var mapView: MapView
@@ -137,6 +150,12 @@ class MainActivity : Activity() {
     private var mockSource: GeoJsonSource? = null
     private var routeSource: GeoJsonSource? = null
     private var destinationSource: GeoJsonSource? = null
+    private var accuracySource: GeoJsonSource? = null
+    private var travelledSource: GeoJsonSource? = null
+    private var vehicleSource: GeoJsonSource? = null
+    private var followDrive = true
+    private var lastDrivePoint: GeoPoint? = null
+    private var routeLengthMeters = 0.0
     private var currentRoute: DirectionsRoute? = null
     private var routeDestination: GeoPoint? = null
     private var mapPickMode = MapPickMode.SPOOF
@@ -160,6 +179,15 @@ class MainActivity : Activity() {
     private var locationLookupActive = false
     private var hasFreshRealFix = false
     private var spoofButtonState = "stopped"
+    private var startedWithoutRealFix = false
+    private var pendingDrive: DrivePlan? = null
+    private var resamplingRealFix = false
+    private val startAnywayAfterLookup = Runnable {
+        if (!pendingStartForFreshFix) return@Runnable
+        pendingStartForFreshFix = false
+        stopCurrentLocationUpdates()
+        startSession()
+    }
     private var suppressMapSync = false
     private val debouncedMapSync = Runnable { syncMapToFields() }
     private val currentLocationTimeout = Runnable {
@@ -167,10 +195,13 @@ class MainActivity : Activity() {
         stopCurrentLocationUpdates()
         if (pendingStartForFreshFix) {
             pendingStartForFreshFix = false
-            setSpoofButton("stopped")
-            showStatus("Real fix unavailable", "Start was not sent. Check Android Location, then retry so the blue marker is saved before mock mode.")
-        } else if (realLocation == null) showStatus("Location not found", "Check that Android Location is on, then try again.")
-        else showStatus("Showing last real fix", "Couldn't refresh. The blue marker is ${realFixAgeLabel()}; stop mock mode before getting a new real fix.")
+            handler.removeCallbacks(startAnywayAfterLookup)
+            showStatus("No real fix yet", "Starting anyway. The blue marker stays empty until you stop and find your location.", chip = "NO REAL FIX")
+            handler.post { if (!isFinishing) startSession() }
+        } else if (resamplingRealFix) {
+            finishRealFixResample("Real location unavailable", "Mock providers are being restored. Nothing was shared.")
+        } else if (realLocation == null) showStatus("Location not found", "Check that Android Location is on, then try again.", chip = "LOCATION NEEDED")
+        else showStatus("Showing last real fix", "Couldn't refresh. The blue marker is ${realFixAgeLabel()}; stop mock mode before getting a new real fix.", chip = "LAST REAL FIX")
     }
 
     private val statusPoll = object : Runnable {
@@ -213,13 +244,18 @@ class MainActivity : Activity() {
         handler.removeCallbacks(statusPoll)
         if (::mapView.isInitialized) mapView.onPause()
         stopCurrentLocationUpdates()
+        // A paused session is a window where apps can see the real location. Never leave it open
+        // because the user navigated away mid-refresh.
+        if (resamplingRealFix) finishRealFixResample("Mock providers restored", "The real-location refresh ended when GeoShift lost focus.")
     }
 
     override fun onDestroy() {
         handler.removeCallbacks(statusPoll)
         handler.removeCallbacks(debouncedMapSync)
         handler.removeCallbacks(currentLocationTimeout)
+        handler.removeCallbacks(startAnywayAfterLookup)
         stopCurrentLocationUpdates()
+        if (resamplingRealFix) finishRealFixResample("Mock providers restored", "The real-location refresh ended when GeoShift closed.")
         routeClient.dispatcher.cancelAll()
         activeRouteCall = null
         if (::mapView.isInitialized) mapView.onDestroy()
@@ -242,15 +278,15 @@ class MainActivity : Activity() {
             if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == android.content.pm.PackageManager.PERMISSION_GRANTED) {
                 startSession()
             } else {
-                showStatus("Location permission is needed", "Allow precise location so the app can verify Android's returned mock fix.")
+                showStatus("Location permission is needed", "Allow precise location so the app can verify Android's returned mock fix.", chip = "ALLOW LOCATION")
             }
         }
-        if (requestCode == REQUEST_PERMISSIONS && pendingLocate) {
+        else if (requestCode == REQUEST_PERMISSIONS && pendingLocate) {
             pendingLocate = false
             if (hasLocationPermission()) {
                 locateCurrentLocation()
             } else {
-                showStatus("Location permission is needed", "Allow location access to center the map on you.")
+                showStatus("Location permission is needed", "Allow location access to center the map on you.", chip = "ALLOW LOCATION")
             }
         }
     }
@@ -284,16 +320,32 @@ class MainActivity : Activity() {
                 mapLibre.uiSettings.setAttributionMargins(dp(8), 0, 0, dp(320))
                 mapLibre.setStyle(Style.Builder().fromUri(DARK_MAP_STYLE_URL)) { style ->
                     contentDescription = "Interactive dark map ready. Tap to choose a mock location."
-                    currentSource = GeoJsonSource(SOURCE_CURRENT, FeatureCollection.fromFeatures(emptyArray()))
-                    mockSource = GeoJsonSource(SOURCE_MOCK, FeatureCollection.fromFeatures(emptyArray()))
-                    routeSource = GeoJsonSource(SOURCE_ROUTE, FeatureCollection.fromFeatures(emptyArray()))
-                    destinationSource = GeoJsonSource(SOURCE_DESTINATION, FeatureCollection.fromFeatures(emptyArray()))
-                    style.addSource(currentSource!!)
-                    style.addSource(routeSource!!)
-                    style.addSource(destinationSource!!)
-                    style.addSource(mockSource!!)
+                    val empty = { FeatureCollection.fromFeatures(emptyArray()) }
+                    currentSource = GeoJsonSource(SOURCE_CURRENT, empty())
+                    mockSource = GeoJsonSource(SOURCE_MOCK, empty())
+                    routeSource = GeoJsonSource(SOURCE_ROUTE, empty())
+                    destinationSource = GeoJsonSource(SOURCE_DESTINATION, empty())
+                    accuracySource = GeoJsonSource(SOURCE_ACCURACY, empty())
+                    travelledSource = GeoJsonSource(SOURCE_TRAVELLED, empty())
+                    vehicleSource = GeoJsonSource(SOURCE_VEHICLE, empty())
+                    listOf(accuracySource, routeSource, travelledSource, destinationSource, currentSource, mockSource, vehicleSource)
+                        .forEach { source -> source?.let(style::addSource) }
+                    // Accuracy first so every marker draws on top of it.
+                    style.addLayer(FillLayer("real-accuracy-fill", SOURCE_ACCURACY).withProperties(
+                        fillColor(0x1E69A8FF), fillOutlineColor(0x5569A8FF)
+                    ))
+                    // A dark casing under the route reads cleanly over both land and water.
+                    style.addLayer(LineLayer("directions-route-casing", SOURCE_ROUTE).withProperties(
+                        lineColor("#05231F"), lineWidth(9f), lineOpacity(0.85f),
+                        lineCap(Property.LINE_CAP_ROUND), lineJoin(Property.LINE_JOIN_ROUND)
+                    ))
                     style.addLayer(LineLayer("directions-route-layer", SOURCE_ROUTE).withProperties(
-                        lineColor("#59D8B9"), lineWidth(5f), lineOpacity(0.94f)
+                        lineColor("#59D8B9"), lineWidth(5.5f), lineOpacity(0.96f),
+                        lineCap(Property.LINE_CAP_ROUND), lineJoin(Property.LINE_JOIN_ROUND)
+                    ))
+                    style.addLayer(LineLayer("directions-route-travelled", SOURCE_TRAVELLED).withProperties(
+                        lineColor("#3A5F5A"), lineWidth(5.5f), lineOpacity(0.95f),
+                        lineCap(Property.LINE_CAP_ROUND), lineJoin(Property.LINE_JOIN_ROUND)
                     ))
                     currentHaloLayer = CircleLayer("current-location-halo", SOURCE_CURRENT).withProperties(
                         circleRadius(22f), circleColor(0x333478E5), circleStrokeColor(0x553478E5), circleStrokeWidth(1f)
@@ -311,17 +363,28 @@ class MainActivity : Activity() {
                         circleRadius(8f), circleColor(0xFFFFD166.toInt()), circleStrokeColor(Color.WHITE), circleStrokeWidth(3f)
                     ))
                     style.addImage(MOCK_ICON, createMockPin())
+                    style.addImage(VEHICLE_ICON, createHeadingMarker())
                     mockPinLayer = SymbolLayer("mock-location-layer", SOURCE_MOCK).withProperties(
                         iconImage(MOCK_ICON), iconSize(1f), iconAnchor(Property.ICON_ANCHOR_BOTTOM), iconAllowOverlap(true), iconIgnorePlacement(true)
                     ).also(style::addLayer)
+                    // The heading marker is driven by a per-feature bearing so it turns with the route.
+                    style.addLayer(SymbolLayer("drive-heading-layer", SOURCE_VEHICLE).withProperties(
+                        iconImage(VEHICLE_ICON), iconSize(1f), iconAllowOverlap(true), iconIgnorePlacement(true),
+                        iconRotate(org.maplibre.android.style.expressions.Expression.get(FEATURE_BEARING)),
+                        iconRotationAlignment(Property.ICON_ROTATION_ALIGNMENT_MAP)
+                    ))
                     realLocation?.let { point ->
                         currentSource?.setGeoJson(Feature.fromGeometry(Point.fromLngLat(point.longitude, point.latitude)))
+                        updateAccuracyCircle(point, realLocationAccuracyMeters)
                         mapLibre.moveCamera(CameraUpdateFactory.newLatLngZoom(LatLng(point.latitude, point.longitude), 15.5))
                     } ?: mapLibre.moveCamera(CameraUpdateFactory.newLatLngZoom(LatLng(20.0, 0.0), 2.5))
                     runCatching { GeoPoint.parse(latitudeInput.text.toString(), longitudeInput.text.toString()) }.getOrNull()?.let { point ->
                         mockSource?.setGeoJson(Feature.fromGeometry(Point.fromLngLat(point.longitude, point.latitude)))
                     }
                     routeDestination?.let(::updateDestinationPin)
+                    mapLibre.addOnCameraMoveStartedListener { reason ->
+                        if (reason == MapLibreMap.OnCameraMoveStartedListener.REASON_API_GESTURE && followDrive) setFollowDrive(false)
+                    }
                     mapLibre.addOnMapClickListener { point ->
                         val selected = GeoPoint(point.latitude, point.longitude)
                         mapView.performHapticFeedback(android.view.HapticFeedbackConstants.KEYBOARD_TAP)
@@ -329,7 +392,7 @@ class MainActivity : Activity() {
                             setRouteDestination(selected, "Map pin")
                         } else {
                             selectSpoofPoint(selected)
-                            showStatus("Spoof point selected", "${formatCoordinate(point.latitude)}, ${formatCoordinate(point.longitude)}")
+                            showStatus("Spoof point selected", "${formatCoordinate(point.latitude)}, ${formatCoordinate(point.longitude)}", chip = "TARGET SET")
                         }
                         true
                     }
@@ -457,9 +520,10 @@ class MainActivity : Activity() {
             isFocusable = true
             addView(View(this@MainActivity).apply { background = rounded(0xFF52666D.toInt(), 20) }, FrameLayout.LayoutParams(dp(42), dp(5), Gravity.CENTER))
         }
+        handle.setOnClickListener { toggleDetails() }
         var handleDownY = 0f
         var handleDragged = false
-        handle.setOnTouchListener { _, event ->
+        handle.setOnTouchListener { view, event ->
             when (event.actionMasked) {
                 android.view.MotionEvent.ACTION_DOWN -> { handleDownY = event.rawY; handleDragged = false; true }
                 android.view.MotionEvent.ACTION_MOVE -> { if (kotlin.math.abs(event.rawY - handleDownY) > dp(10)) handleDragged = true; true }
@@ -467,8 +531,8 @@ class MainActivity : Activity() {
                     val delta = event.rawY - handleDownY
                     if (handleDragged && kotlin.math.abs(delta) > dp(24)) {
                         val expanded = detailsGroup.visibility == View.VISIBLE
-                        if ((delta < 0 && !expanded) || (delta > 0 && expanded)) toggleDetails()
-                    } else toggleDetails()
+                        if ((delta < 0 && !expanded) || (delta > 0 && expanded)) view.performClick()
+                    } else view.performClick()
                     true
                 }
                 android.view.MotionEvent.ACTION_CANCEL -> true
@@ -495,6 +559,37 @@ class MainActivity : Activity() {
         titleRow.isClickable = true
         titleRow.setOnClickListener { toggleDetails() }
         sheet.addView(titleRow)
+
+        val driveHeader = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        driveHeader.addView(
+            text("TRAVELLING", 10f, UiPalette.primaryDeep, bold = true).apply { letterSpacing = 0.1f },
+            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        )
+        driveFollowChip = actionChip("Following", UiPalette.primaryContainer, UiPalette.primaryDeep, iconResource = R.drawable.ic_my_location) {
+            setFollowDrive(!followDrive)
+        }.apply { tag = "drive-follow"; textSize = 11f; minHeight = dp(36) }
+        driveHeader.addView(driveFollowChip, LinearLayout.LayoutParams(dp(116), dp(36)))
+        driveHeadline = text("—", 20f, UiPalette.ink, bold = true).apply { tag = "drive-headline" }
+        driveSubline = text("", 11f, UiPalette.muted)
+        val progressTrack = FrameLayout(this).apply {
+            background = rounded(UiPalette.outline, 4)
+            addView(View(this@MainActivity).apply {
+                background = rounded(UiPalette.primaryDeep, 4)
+                tag = "drive-progress"
+            }.also { driveProgressFill = it }, FrameLayout.LayoutParams(0, dp(6)))
+        }
+        driveHud = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            tag = "drive-hud"
+            visibility = View.GONE
+            setPadding(dp(14), dp(11), dp(14), dp(12))
+            background = rounded(0xFF11282B.toInt(), 20, UiPalette.primaryContainer)
+            addView(driveHeader, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+            addView(driveHeadline, margin(top = 4))
+            addView(progressTrack, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(6)).apply { topMargin = dp(9) })
+            addView(driveSubline, margin(top = 7))
+        }
+        sheet.addView(driveHud, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(11) })
 
         val placesHeader = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
         savedPlacesTitle = text("SAVED PLACES", 10f, UiPalette.muted, bold = true).apply { letterSpacing = 0.08f }
@@ -550,6 +645,16 @@ class MainActivity : Activity() {
         }
         sheet.addView(detailsGroup, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(10) })
 
+        travelButton = actionChip("Travel to destination", UiPalette.primaryContainer, UiPalette.primaryDeep, iconResource = R.drawable.ic_directions) {
+            currentRoute?.let(::offerDriveRoute) ?: showDirectionsDialog()
+        }.apply {
+            tag = "travel-route"
+            textSize = 14f
+            visibility = View.GONE
+            minHeight = dp(50)
+        }
+        sheet.addView(travelButton, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(50)).apply { topMargin = dp(10) })
+
         val actions = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
         startButton = actionChip("Start spoofing", UiPalette.primary, Color.WHITE) { toggleSpoofing() }.apply {
             textSize = 15f
@@ -562,7 +667,17 @@ class MainActivity : Activity() {
         setButtonIcon(R.drawable.ic_play)
         actions.addView(startButton, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(58)))
         sheet.addView(actions, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(10) })
-        root.addView(sheet, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM))
+        // In landscape the expanded sheet is taller than the screen; a scroll container keeps the
+        // Start action reachable instead of clipping it off the bottom.
+        val sheetScroll = ScrollView(this).apply {
+            tag = "location-control-scroll"
+            isFillViewport = true
+            clipToPadding = false
+            isVerticalScrollBarEnabled = false
+            overScrollMode = View.OVER_SCROLL_IF_CONTENT_SCROLLS
+            addView(sheet, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        }
+        root.addView(sheetScroll, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM))
 
         mapAttribution = text("OpenFreeMap · OpenMapTiles · OSM", 10f, UiPalette.ink).apply {
             setPadding(dp(7), dp(4), dp(7), dp(4))
@@ -572,8 +687,8 @@ class MainActivity : Activity() {
         }
         root.addView(mapAttribution, FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM or Gravity.END).apply { marginEnd = dp(12) })
         var bottomSystemInset = 0
-        sheet.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
-            val panelHeight = sheet.height + dp(10)
+        sheetScroll.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+            val panelHeight = sheetScroll.height + dp(10)
             (mapAttribution.layoutParams as? FrameLayout.LayoutParams)?.let { lp -> lp.bottomMargin = panelHeight; mapAttribution.layoutParams = lp }
             map?.uiSettings?.setAttributionMargins(dp(8), 0, 0, panelHeight + bottomSystemInset)
         }
@@ -600,29 +715,32 @@ class MainActivity : Activity() {
     }
 
     private fun showMoreOptions() {
-        val options = arrayOf(
-            "Save selected point as Home", "Save selected place", "Set mock accuracy",
-            "Privacy checkup", "Developer setup", "Open in map app", "Export saved places", "Import saved places"
-        )
-        AlertDialog.Builder(this).setTitle("More options").setItems(options) { _, which ->
-            when (which) {
-                0 -> saveHome()
-                1 -> addFavorite()
-                2 -> showAccuracyPicker()
-                3 -> showPrivacyCheckup()
-                4 -> openDeveloperOptions()
-                5 -> openMapPreview()
-                6 -> startActivityForResult(Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+        val options = buildList<Pair<String, () -> Unit>> {
+            currentRoute?.let { route -> add("Travel the planned route" to { offerDriveRoute(route) }) }
+            add("Save selected point as Home" to ::saveHome)
+            add("Save selected place" to ::addFavorite)
+            add("Set mock accuracy" to ::showAccuracyPicker)
+            add("Privacy checkup" to ::showPrivacyCheckup)
+            add("Developer setup" to ::openDeveloperOptions)
+            add("Location accuracy settings" to ::openLocationSettings)
+            add("Open in map app" to ::openMapPreview)
+            add("Export saved places" to {
+                startActivityForResult(Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
                     addCategory(Intent.CATEGORY_OPENABLE)
                     type = "application/json"
                     putExtra(Intent.EXTRA_TITLE, "GeoShift-saved-places.json")
                 }, REQUEST_EXPORT_PLACES)
-                7 -> startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            })
+            add("Import saved places" to {
+                startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
                     addCategory(Intent.CATEGORY_OPENABLE)
                     type = "application/json"
                 }, REQUEST_IMPORT_PLACES)
-            }
-        }.show()
+            })
+        }
+        AlertDialog.Builder(this).setTitle("More options")
+            .setItems(options.map { it.first }.toTypedArray()) { _, which -> options[which].second() }
+            .show()
     }
 
     private fun showPrivacyCheckup() {
@@ -634,7 +752,7 @@ class MainActivity : Activity() {
         val approximate = checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) == android.content.pm.PackageManager.PERMISSION_GRANTED
         val mockEnabled = isSelectedMockApp()
         val session = getSharedPreferences(MockLocationService.PREFS, Context.MODE_PRIVATE)
-        val spoofActive = session.getString(MockLocationService.KEY_STATE, "stopped") == "active"
+        val spoofActive = session.getString(MockLocationService.KEY_STATE, MockLocationService.STATE_STOPPED) == MockLocationService.STATE_ACTIVE
         val checks = listOf(
             "GeoShift permission: ${if (precise) "precise" else if (approximate) "approximate" else "not granted"}",
             "Android Location: ${if (locationEnabled) "on" else "off"}",
@@ -644,13 +762,14 @@ class MainActivity : Activity() {
         )
         val message = buildString {
             checks.forEach { append("• ").append(it).append('\n') }
-            append("\nGeoShift changes Android mock GPS/network fixes only. Apps may detect mock fixes or use Wi‑Fi, cell, cached, account, or network location. This checkup cannot verify or falsify those sources. Review location permission and sharing separately in Android and Google settings.")
+            append("\nGeoShift replaces Android's gps, network, and fused fixes only. Apps can still detect a mock fix, or place you from Wi‑Fi, cell, IP, cached, or account signals. If an app keeps showing your real area, turn off Google Location Accuracy and Wi‑Fi/Bluetooth scanning in Android Location settings. This checkup cannot verify or falsify those sources.")
         }
         val settingsActions = arrayOf(
             "Android Location settings",
             "Installed app settings",
             "GeoShift app permissions",
-            "Google Account location controls"
+            "Google Account location controls",
+            "Forget the saved real location"
         )
         AlertDialog.Builder(this)
             .setTitle("Privacy checkup")
@@ -661,9 +780,32 @@ class MainActivity : Activity() {
                     1 -> openInstalledAppSettings()
                     2 -> openAppSettings()
                     3 -> openGoogleAccountLocationControls()
+                    4 -> forgetSavedRealLocation()
                 }
             }
             .setPositiveButton("Done", null)
+            .show()
+    }
+
+    private fun forgetSavedRealLocation() {
+        AlertDialog.Builder(this)
+            .setTitle("Forget the saved real location?")
+            .setMessage("GeoShift will delete the cached real fix from this device. The blue marker disappears and route starts from “${ORIGIN_MY_LOCATION}” stop working until you find your location again.")
+            .setNegativeButton("Keep", null)
+            .setPositiveButton("Forget") { _, _ ->
+                getPreferences(Context.MODE_PRIVATE).edit()
+                    .remove(KEY_LAST_REAL_LAT).remove(KEY_LAST_REAL_LON)
+                    .remove(KEY_LAST_REAL_TIME).remove(KEY_LAST_REAL_ACCURACY)
+                    .apply()
+                realLocation = null
+                realLocationFixTimeMs = 0L
+                realLocationAccuracyMeters = null
+                hasFreshRealFix = false
+                currentSource?.setGeoJson(FeatureCollection.fromFeatures(emptyArray()))
+                updateAccuracyCircle(null, null)
+                updateRealLocationLegend()
+                showStatus("Saved real location deleted", "Nothing about your real position is stored on this device now.")
+            }
             .show()
     }
 
@@ -791,11 +933,11 @@ class MainActivity : Activity() {
         refreshSavedPlacesStrip()
     }
 
-    private fun updateMockPin(point: GeoPoint?, moveCamera: Boolean = false) {
+    private fun updateMockPin(point: GeoPoint?, moveCamera: Boolean = false, animate: Boolean = true) {
         if (point == null) mockSource?.setGeoJson(FeatureCollection.fromFeatures(emptyArray()))
         else {
             mockSource?.setGeoJson(Feature.fromGeometry(Point.fromLngLat(point.longitude, point.latitude)))
-            popTargetPin()
+            if (animate) popTargetPin()
         }
         if (moveCamera && point != null) moveCameraToSelection(point)
     }
@@ -834,8 +976,9 @@ class MainActivity : Activity() {
 
     private fun updateCurrentPin(point: GeoPoint) {
         currentSource?.setGeoJson(Feature.fromGeometry(Point.fromLngLat(point.longitude, point.latitude)))
+        updateAccuracyCircle(point, realLocationAccuracyMeters)
         pulseCurrentLocation()
-        val selected = runCatching { GeoPoint.parse(latitudeInput.text.toString(), longitudeInput.text.toString()) }.getOrNull()
+        val selected = selectedSpoofPoint()
         if (selected == null) map?.animateCamera(CameraUpdateFactory.newLatLngZoom(LatLng(point.latitude, point.longitude), 16.0), 480)
         else if (distanceMeters(selected, point) > 120.0) fitLocations(selected, point)
     }
@@ -895,6 +1038,101 @@ class MainActivity : Activity() {
         return bitmap
     }
 
+    /** A triangular heading marker, rotated per fix, used while a route is being travelled. */
+    private fun createHeadingMarker(): Bitmap {
+        val size = dp(40)
+        val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bitmap)
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+        paint.color = 0x33000000
+        canvas.drawCircle(size / 2f, size / 2f, size * .46f, paint)
+        paint.color = UiPalette.canvas
+        canvas.drawCircle(size / 2f, size / 2f, size * .40f, paint)
+        val arrow = Path().apply {
+            moveTo(size * .5f, size * .14f)
+            lineTo(size * .80f, size * .84f)
+            lineTo(size * .5f, size * .66f)
+            lineTo(size * .20f, size * .84f)
+            close()
+        }
+        paint.color = UiPalette.target
+        canvas.drawPath(arrow, paint)
+        paint.style = Paint.Style.STROKE
+        paint.strokeWidth = dp(2).toFloat()
+        paint.color = Color.WHITE
+        canvas.drawPath(arrow, paint)
+        return bitmap
+    }
+
+    /**
+     * MapLibre circle radii are in screen pixels, so a true accuracy ring has to be a polygon in
+     * real coordinates; otherwise it would stay the same size as the user zooms.
+     */
+    private fun metreCircle(center: GeoPoint, radiusMeters: Double): Feature {
+        val steps = 48
+        val latitudeRadius = radiusMeters / 111_320.0
+        val longitudeRadius = radiusMeters / (111_320.0 * kotlin.math.cos(Math.toRadians(center.latitude)).coerceAtLeast(0.01))
+        val ring = (0..steps).map { step ->
+            val angle = 2.0 * Math.PI * step / steps
+            Point.fromLngLat(
+                center.longitude + longitudeRadius * kotlin.math.cos(angle),
+                (center.latitude + latitudeRadius * kotlin.math.sin(angle)).coerceIn(-90.0, 90.0)
+            )
+        }
+        return Feature.fromGeometry(Polygon.fromLngLats(listOf(ring)))
+    }
+
+    private fun updateAccuracyCircle(point: GeoPoint?, accuracyMeters: Float?) {
+        val source = accuracySource ?: return
+        val radius = accuracyMeters?.toDouble()?.takeIf { it > 1.0 }
+        if (point == null || radius == null) source.setGeoJson(FeatureCollection.fromFeatures(emptyArray()))
+        else source.setGeoJson(metreCircle(point, radius))
+    }
+
+    private fun updateHeadingMarker(point: GeoPoint?, bearingDegrees: Float) {
+        val source = vehicleSource ?: return
+        if (point == null) {
+            source.setGeoJson(FeatureCollection.fromFeatures(emptyArray()))
+            return
+        }
+        source.setGeoJson(Feature.fromGeometry(Point.fromLngLat(point.longitude, point.latitude)).apply {
+            addNumberProperty(FEATURE_BEARING, bearingDegrees)
+        })
+    }
+
+    /** Dims the part of the route already covered, so progress is readable at a glance. */
+    private fun updateTravelledRoute(remainingMeters: Double) {
+        val source = travelledSource ?: return
+        val points = currentRoute?.points
+        if (points == null || points.size < 2 || remainingMeters < 0.0) {
+            source.setGeoJson(FeatureCollection.fromFeatures(emptyArray()))
+            return
+        }
+        var budget = (routeLengthMeters - remainingMeters).coerceAtLeast(0.0)
+        val travelled = mutableListOf(points.first())
+        for (index in 1 until points.size) {
+            val leg = RouteSimulator.metersBetween(points[index - 1], points[index])
+            if (leg <= budget) {
+                travelled += points[index]
+                budget -= leg
+            } else {
+                val progress = if (leg <= 0.0) 0.0 else budget / leg
+                travelled += GeoPoint(
+                    points[index - 1].latitude + (points[index].latitude - points[index - 1].latitude) * progress,
+                    points[index - 1].longitude + (points[index].longitude - points[index - 1].longitude) * progress
+                )
+                break
+            }
+        }
+        if (travelled.size < 2) {
+            source.setGeoJson(FeatureCollection.fromFeatures(emptyArray()))
+            return
+        }
+        source.setGeoJson(Feature.fromGeometry(LineString.fromLngLats(
+            travelled.map { Point.fromLngLat(it.longitude, it.latitude) }
+        )))
+    }
+
     private fun locateCurrentLocation() {
         if (!hasLocationPermission()) {
             pendingLocate = true
@@ -903,16 +1141,16 @@ class MainActivity : Activity() {
         }
         val sessionState = getSharedPreferences(MockLocationService.PREFS, Context.MODE_PRIVATE)
             .getString(MockLocationService.KEY_STATE, "stopped")
-        if (sessionState == "active" || sessionState == "starting") {
+        if (!resamplingRealFix && (sessionState == MockLocationService.STATE_ACTIVE || sessionState == MockLocationService.STATE_STARTING)) {
             locationLookupActive = false
-            showStatus("Mock session is active", realLocationSnapshotDetail())
+            offerRealFixResample()
             return
         }
         val manager = getSystemService(Context.LOCATION_SERVICE) as LocationManager
         val enabledProviders = listOf(LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER)
             .filter { provider -> try { manager.isProviderEnabled(provider) } catch (_: Exception) { false } }
         if (enabledProviders.isEmpty()) {
-            showStatus("Turn on Location", "Enable Android Location services, then tap the blue map button again.")
+            showStatus("Turn on Location", "Enable Android Location services, then tap the blue map button again.", chip = "LOCATION NEEDED")
             return
         }
         if (realLocation == null) {
@@ -933,9 +1171,9 @@ class MainActivity : Activity() {
         val requestId = ++locationRequestGeneration
         locationLookupActive = true
         if (pendingStartForFreshFix) {
-            showStatus("Waiting for your real fix…", "Saving a fresh non-mock location before starting mock mode.")
+            showStatus("Finding your real location…", "Saving a fresh non-mock fix before mock mode starts.", chip = "SAVING REAL FIX…")
         } else {
-            showStatus("Finding your location…", "Centering the map on a fresh non-mock fix.")
+            showStatus("Finding your location…", "Centering the map on a fresh non-mock fix.", chip = "LOCATING…")
         }
         try {
             val listener = object : LocationListener {
@@ -961,10 +1199,10 @@ class MainActivity : Activity() {
             handler.postDelayed(currentLocationTimeout, CURRENT_LOCATION_TIMEOUT_MS)
         } catch (failure: SecurityException) {
             stopCurrentLocationUpdates()
-            showStatus("Location permission is needed", failure.localizedMessage ?: "Allow precise location and try again.")
+            showStatus("Location permission is needed", failure.localizedMessage ?: "Allow precise location and try again.", chip = "ALLOW LOCATION")
         } catch (failure: Exception) {
             stopCurrentLocationUpdates()
-            showStatus("Could not find location", failure.localizedMessage ?: "Try again with Location enabled.")
+            showStatus("Could not find location", failure.localizedMessage ?: "Try again with Location enabled.", chip = "LOCATION NEEDED")
         }
     }
 
@@ -1001,13 +1239,43 @@ class MainActivity : Activity() {
         updateRealLocationLegend()
         showStatus(
             if (hasFreshRealFix) "You are here" else "Showing last location",
-            (if (hasFreshRealFix) "Fresh real fix" else "Recent real fix") + " · ±${realLocationAccuracyMeters?.let { formatRouteDistance(it.toDouble()) } ?: "unknown accuracy"} · ${formatCoordinate(point.latitude)}, ${formatCoordinate(point.longitude)}"
+            (if (hasFreshRealFix) "Fresh real fix" else "Recent real fix") + " · ±${realLocationAccuracyMeters?.let { formatRouteDistance(it.toDouble()) } ?: "unknown accuracy"} · ${formatCoordinate(point.latitude)}, ${formatCoordinate(point.longitude)}",
+            chip = if (hasFreshRealFix) "REAL FIX READY" else "LAST REAL FIX"
         )
-        if (!pendingStartForFreshFix || hasFreshRealFix) stopCurrentLocationUpdates()
-        if (pendingStartForFreshFix && hasFreshRealFix) {
+        stopCurrentLocationUpdates()
+        if (pendingStartForFreshFix) {
             pendingStartForFreshFix = false
+            handler.removeCallbacks(startAnywayAfterLookup)
             handler.post { if (!isFinishing) startSession() }
+        } else if (resamplingRealFix) {
+            finishRealFixResample("Real location updated", "Mock providers are being restored now.")
         }
+    }
+
+    /**
+     * Android stops reporting real fixes while test providers are registered, so the only honest way
+     * to refresh the blue marker mid-session is to remove them briefly. That window is visible to
+     * other apps, so it is always confirmed first and always re-armed afterwards.
+     */
+    private fun offerRealFixResample() {
+        AlertDialog.Builder(this)
+            .setTitle("Refresh your real location?")
+            .setMessage("GeoShift must remove Android's mock providers for a few seconds to read a real fix. During that window other apps can see where you actually are. Mock mode is restored automatically.")
+            .setNegativeButton("Keep spoofing", null)
+            .setPositiveButton("Pause and refresh") { _, _ ->
+                resamplingRealFix = true
+                startService(Intent(this, MockLocationService::class.java).setAction(MockLocationService.ACTION_PAUSE))
+                showStatus("Reading your real location…", "Mock providers are paused. Your real location is briefly visible to apps.", chip = "PAUSED · REAL FIX")
+                // Give Android a moment to tear the test providers down before asking for a fix.
+                handler.postDelayed({ if (!isFinishing && resamplingRealFix) locateCurrentLocation() }, 700L)
+            }
+            .show()
+    }
+
+    private fun finishRealFixResample(title: String, detail: String) {
+        resamplingRealFix = false
+        startService(Intent(this, MockLocationService::class.java).setAction(MockLocationService.ACTION_RESUME))
+        showStatus(title, detail, chip = "RESUMING MOCK…")
     }
 
     private fun loadLastRealLocation(): GeoPoint? {
@@ -1046,7 +1314,7 @@ class MainActivity : Activity() {
     private fun realLocationSnapshotDetail(): String = if (realLocation == null) {
         "No real fix was saved before mock mode. Android only returns the mock fix while it is active; stop spoofing to find your real location."
     } else {
-        "Blue marker is your last verified real fix (${realFixAgeLabel()}); live real GPS is unavailable while Android's mock providers are active."
+        "Blue marker is your last verified real fix (${realFixAgeLabel()}). Android cannot report live real GPS while mock providers are active — tap the blue locate button to pause them briefly and refresh it."
     }
 
     private fun updateRealLocationLegend() {
@@ -1069,7 +1337,7 @@ class MainActivity : Activity() {
             showStatus("Address search unavailable", "Enter latitude and longitude directly on this device.")
             return
         }
-        showStatus("Searching…", "Looking up “$query”.")
+        showStatus("Searching…", "Looking up “$query”.", chip = "SEARCHING…")
         geocoderExecutor.execute {
             try {
                 @Suppress("DEPRECATION")
@@ -1130,11 +1398,15 @@ class MainActivity : Activity() {
             setRouteDestination(suggestion.point, suggestion.label)
         } else {
             selectSpoofPoint(suggestion.point)
-            showStatus("Spoof point selected", suggestion.label)
+            showStatus("Spoof point selected", suggestion.label, chip = "TARGET SET")
         }
         addressInput.dismissDropDown()
         map?.animateCamera(CameraUpdateFactory.newLatLngZoom(LatLng(suggestion.point.latitude, suggestion.point.longitude), 15.0), 520)
     }
+
+    private fun selectedSpoofPoint(): GeoPoint? =
+        if (!::latitudeInput.isInitialized) null
+        else runCatching { GeoPoint.parse(latitudeInput.text.toString(), longitudeInput.text.toString()) }.getOrNull()
 
     private fun selectSpoofPoint(point: GeoPoint) {
         suppressMapSync = true
@@ -1158,7 +1430,7 @@ class MainActivity : Activity() {
         routeDestination = point
         updateDestinationPin(point)
         map?.animateCamera(CameraUpdateFactory.newLatLngZoom(LatLng(point.latitude, point.longitude), 15.0), 480)
-        showStatus("Destination selected", "$label · ${formatCoordinate(point.latitude)}, ${formatCoordinate(point.longitude)}")
+        showStatus("Destination selected", "$label · ${formatCoordinate(point.latitude)}, ${formatCoordinate(point.longitude)}", chip = "TARGET SET")
     }
 
     private fun updateDestinationPin(point: GeoPoint?) {
@@ -1174,9 +1446,16 @@ class MainActivity : Activity() {
         }
         val originInput = edit("Start location or coordinates").apply {
             tag = "directions-origin"
-            setText("My location")
+            setText(ORIGIN_SPOOF_POINT)
             setSelection(text.length)
         }
+        val originPresets = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        originPresets.addView(actionChip(ORIGIN_SPOOF_POINT, UiPalette.primaryContainer, UiPalette.primaryDeep, iconResource = R.drawable.ic_place) {
+            originInput.setText(ORIGIN_SPOOF_POINT)
+        }, LinearLayout.LayoutParams(0, dp(44), 1f))
+        originPresets.addView(actionChip(ORIGIN_MY_LOCATION, UiPalette.surfaceRaised, UiPalette.ink, iconResource = R.drawable.ic_my_location) {
+            originInput.setText(ORIGIN_MY_LOCATION)
+        }, LinearLayout.LayoutParams(0, dp(44), 1f).apply { marginStart = dp(8) })
         val destinationInput = AutoCompleteTextView(this).apply {
             tag = "directions-destination"
             hint = "Destination or coordinates"
@@ -1202,11 +1481,12 @@ class MainActivity : Activity() {
             routeDestination?.let { setText("${it.latitude}, ${it.longitude}") }
         }
         content.addView(text("START", 10f, UiPalette.muted, bold = true), margin(bottom = 4))
+        content.addView(originPresets, margin(bottom = 6))
         content.addView(originInput, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(52)))
         content.addView(text("DESTINATION", 10f, UiPalette.muted, bold = true), margin(top = 12, bottom = 4))
         content.addView(destinationInput, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(52)))
         content.addView(
-            text("My location uses your last verified real fix. Before searching, GeoShift will ask before sending route locations to external services.", 11f, UiPalette.muted),
+            text("“${ORIGIN_SPOOF_POINT}” routes from the coral marker, so nothing about where you really are leaves the device. “${ORIGIN_MY_LOCATION}” uses your last verified real fix instead. GeoShift asks before sending either to the routing service.", 11f, UiPalette.muted),
             margin(top = 12)
         )
         AlertDialog.Builder(this)
@@ -1222,8 +1502,12 @@ class MainActivity : Activity() {
             showStatus("Enter both locations", "Add a start and destination to find a route.")
             return
         }
-        if (originQuery.equals("My location", ignoreCase = true) && realLocation == null) {
-            showStatus("Real location unavailable", "Stop mock mode and wait for a real fix, or enter a start address or coordinates.")
+        if (originQuery.equals(ORIGIN_MY_LOCATION, ignoreCase = true) && realLocation == null) {
+            showStatus("Real location unavailable", "Stop mock mode and wait for a real fix, or start from the spoof point instead.")
+            return
+        }
+        if (originQuery.equals(ORIGIN_SPOOF_POINT, ignoreCase = true) && selectedSpoofPoint() == null) {
+            showStatus("Choose a spoof point", "Tap the map or pick a saved place first, then plan the route from it.", chip = "NO TARGET")
             return
         }
         if (!Geocoder.isPresent() && (originQuery.containsLetters() || destinationQuery.containsLetters())) {
@@ -1233,7 +1517,12 @@ class MainActivity : Activity() {
 
         AlertDialog.Builder(this)
             .setTitle("Send locations for directions?")
-            .setMessage("Finding this route may send the start and destination to Android's geocoder and the public OSRM routing service. If you chose My location, that is your last saved real fix. Continue only if you want to share these locations for this request.")
+            .setMessage(
+                "Finding this route sends the start and destination to Android's geocoder and the public OSRM routing service." +
+                    if (originQuery.equals(ORIGIN_MY_LOCATION, ignoreCase = true))
+                        " The start is your last saved real fix, so your real location leaves the device for this request."
+                    else " The start is not your real location, so your real position is not sent."
+            )
             .setNegativeButton("Cancel", null)
             .setPositiveButton("Send and find route") { _, _ -> lookupDirections(originQuery, destinationQuery) }
             .show()
@@ -1242,7 +1531,7 @@ class MainActivity : Activity() {
     private fun lookupDirections(originQuery: String, destinationQuery: String) {
         activeRouteCall?.cancel()
         val requestId = ++routeLookupGeneration
-        showStatus("Finding directions…", "Resolving both locations and requesting an in-app route.")
+        showStatus("Finding directions…", "Resolving both locations and requesting an in-app route.", chip = "ROUTE SEARCH…")
         geocoderExecutor.execute {
             val resolved = runCatching {
                 resolveRoutePoint(originQuery, allowMyLocation = true) to
@@ -1284,7 +1573,7 @@ class MainActivity : Activity() {
                                 parsed.onSuccess { route ->
                                     showRouteOnMap(route)
                                     showRouteStepsDialog(route)
-                                    showStatus("Route ready", "${formatRouteDistance(route.distanceMeters)} · ${formatRouteDuration(route.durationSeconds)} · shown on the map")
+                                    showStatus("Route ready", "${formatRouteDistance(route.distanceMeters)} · ${formatRouteDuration(route.durationSeconds)} · shown on the map", chip = "ROUTE READY")
                                 }.onFailure { failure ->
                                     showStatus("No route found", failure.message ?: "Try a different start or destination.")
                                 }
@@ -1297,7 +1586,10 @@ class MainActivity : Activity() {
     }
 
     private fun resolveRoutePoint(query: String, allowMyLocation: Boolean): GeoPoint {
-        if (allowMyLocation && (query.equals("My location", true) || query.equals("Current location", true))) {
+        if (allowMyLocation && query.equals(ORIGIN_SPOOF_POINT, true)) {
+            return selectedSpoofPoint() ?: error("Choose a spoof point on the map first.")
+        }
+        if (allowMyLocation && (query.equals(ORIGIN_MY_LOCATION, true) || query.equals("Current location", true))) {
             return realLocation ?: error("No verified real location is saved. Stop mock mode or enter a start location.")
         }
         parseCoordinateQuery(query)?.let { return it }
@@ -1316,7 +1608,10 @@ class MainActivity : Activity() {
 
     private fun showRouteOnMap(route: DirectionsRoute) {
         currentRoute = route
+        routeLengthMeters = runCatching { RouteSimulator(route.points, 1.0).totalMeters }.getOrDefault(0.0)
         renderRouteOnMap(route)
+        setFollowDrive(true)
+        refreshDriveControls()
     }
 
     private fun renderRouteOnMap(route: DirectionsRoute) {
@@ -1372,7 +1667,26 @@ class MainActivity : Activity() {
             .setTitle("Directions")
             .setView(content)
             .setNeutralButton("Clear route") { _, _ -> clearRoute() }
-            .setPositiveButton("Done", null)
+            .setNegativeButton("Close", null)
+            .setPositiveButton("Travel this route") { _, _ -> offerDriveRoute(route) }
+            .show()
+    }
+
+    private fun offerDriveRoute(route: DirectionsRoute) {
+        if (route.points.size < 2) {
+            showStatus("Route too short", "Plan a route with at least two points before driving it.")
+            return
+        }
+        val labels = DRIVE_SPEED_LABELS
+        AlertDialog.Builder(this)
+            .setTitle("Travel this route")
+            .setMessage("GeoShift will move your reported location along the route from its start to the destination. Apps see the whole trip; your real location is never sent.")
+            .setItems(labels) { _, which ->
+                pendingDrive = DrivePlan(route.points, DRIVE_SPEEDS_KPH[which])
+                selectSpoofPoint(route.points.first())
+                startSession()
+            }
+            .setNegativeButton("Cancel", null)
             .show()
     }
 
@@ -1381,7 +1695,11 @@ class MainActivity : Activity() {
         activeRouteCall?.cancel()
         activeRouteCall = null
         currentRoute = null
+        routeLengthMeters = 0.0
         routeSource?.setGeoJson(FeatureCollection.fromFeatures(emptyArray()))
+        travelledSource?.setGeoJson(FeatureCollection.fromFeatures(emptyArray()))
+        updateHeadingMarker(null, 0f)
+        refreshDriveControls()
         showStatus("Route cleared", "The directions line was removed from the map.")
     }
 
@@ -1407,7 +1725,7 @@ class MainActivity : Activity() {
         val point = try {
             GeoPoint.parse(latitudeInput.text.toString(), longitudeInput.text.toString())
         } catch (failure: IllegalArgumentException) {
-            showStatus("Check the coordinates", failure.message ?: "Enter valid coordinates.")
+            showStatus("Check the coordinates", failure.message ?: "Enter valid coordinates.", chip = "INVALID POINT")
             return
         }
 
@@ -1425,7 +1743,7 @@ class MainActivity : Activity() {
             return
         }
         if (!isSelectedMockApp()) {
-            showStatus("Select GeoShift as the mock app", "Open Developer options and choose GeoShift under Select mock location app.")
+            showStatus("Select GeoShift as the mock app", "Open Developer options and choose GeoShift under Select mock location app.", chip = "SELECT MOCK APP")
             AlertDialog.Builder(this)
                 .setTitle("Select GeoShift as mock app")
                 .setMessage("Android only allows the selected mock-location app to set test provider locations.")
@@ -1439,7 +1757,7 @@ class MainActivity : Activity() {
             manager.isProviderEnabled(LocationManager.GPS_PROVIDER) || manager.isProviderEnabled(LocationManager.NETWORK_PROVIDER)
         }
         if (!locationOn) {
-            showStatus("Turn on Location", "Android location services must be enabled for apps to receive provider updates.")
+            showStatus("Turn on Location", "Android location services must be enabled for apps to receive provider updates.", chip = "LOCATION NEEDED")
             AlertDialog.Builder(this)
                 .setMessage("Turn on Android Location services, then tap Start again.")
                 .setPositiveButton("Open Location settings") { _, _ -> startActivity(Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS)) }
@@ -1448,33 +1766,54 @@ class MainActivity : Activity() {
             return
         }
 
-        if (!hasFreshRealFix) {
+        // A real fix is useful (it is what the blue marker and route origins use) but it must never
+        // block spoofing: indoors the lookup can simply never succeed.
+        if (realLocation == null && !startedWithoutRealFix) {
             pendingStartForFreshFix = true
+            startedWithoutRealFix = true
             setSpoofButton("starting")
-            showStatus("Waiting for your real fix…", "GeoShift will save a fresh, non-mock location first. The blue marker then stays pinned to that fix while Android's mock providers are active.")
+            showStatus("Finding your real location…", "Saving it for the blue marker and route starts. Spoofing begins in a few seconds either way.", chip = "SAVING REAL FIX…")
             locateCurrentLocation()
+            handler.postDelayed(startAnywayAfterLookup, START_ANYWAY_DELAY_MS)
             return
         }
-
+        pendingStartForFreshFix = false
+        startedWithoutRealFix = false
+        handler.removeCallbacks(startAnywayAfterLookup)
         stopCurrentLocationUpdates()
 
         val accuracy = when (getPreferences(Context.MODE_PRIVATE).getInt(KEY_ACCURACY_INDEX, 0)) { 1 -> 15f; 2 -> 50f; else -> 5f }
+        val drive = pendingDrive
+        pendingDrive = null
+        val origin = drive?.points?.firstOrNull() ?: point
         val intent = Intent(this, MockLocationService::class.java)
             .setAction(MockLocationService.ACTION_START)
-            .putExtra(MockLocationService.EXTRA_LATITUDE, point.latitude)
-            .putExtra(MockLocationService.EXTRA_LONGITUDE, point.longitude)
+            .putExtra(MockLocationService.EXTRA_LATITUDE, origin.latitude)
+            .putExtra(MockLocationService.EXTRA_LONGITUDE, origin.longitude)
             .putExtra(MockLocationService.EXTRA_ACCURACY, accuracy)
-        showStatus("Starting…", "Requesting an Android mock GPS and network fix.")
+        if (drive != null) {
+            intent.putExtra(MockLocationService.EXTRA_ROUTE, drive.flatCoordinates())
+            intent.putExtra(MockLocationService.EXTRA_SPEED_KPH, drive.speedKph)
+        }
+        showStatus(
+            "Starting…",
+            if (drive == null) "Requesting Android mock GPS, network, and fused fixes."
+            else "Travelling the planned route at ${drive.speedKph.toInt()} km/h.",
+            chip = if (drive == null) "STARTING…" else "STARTING TRIP…"
+        )
         try {
             startForegroundService(intent)
         } catch (failure: Exception) {
-            showStatus("Could not start", failure.localizedMessage ?: failure.javaClass.simpleName)
+            showStatus("Could not start", failure.localizedMessage ?: failure.javaClass.simpleName, chip = "START FAILED")
         }
     }
 
     private fun stopSession() {
+        resamplingRealFix = false
+        pendingDrive = null
+        handler.removeCallbacks(startAnywayAfterLookup)
         startService(Intent(this, MockLocationService::class.java).setAction(MockLocationService.ACTION_STOP))
-        showStatus("Stopping…", "Removing the mock providers from Android.")
+        showStatus("Stopping…", "Removing the mock providers from Android.", chip = "STOPPING…")
     }
 
     private fun isSelectedMockApp(): Boolean {
@@ -1503,7 +1842,7 @@ class MainActivity : Activity() {
         val point = try {
             GeoPoint.parse(latitudeInput.text.toString(), longitudeInput.text.toString())
         } catch (failure: IllegalArgumentException) {
-            showStatus("Check the coordinates", failure.message ?: "Enter valid coordinates.")
+            showStatus("Check the coordinates", failure.message ?: "Enter valid coordinates.", chip = "INVALID POINT")
             return
         }
         getPreferences(Context.MODE_PRIVATE).edit()
@@ -1531,7 +1870,7 @@ class MainActivity : Activity() {
         val point = try {
             GeoPoint.parse(latitudeInput.text.toString(), longitudeInput.text.toString())
         } catch (failure: IllegalArgumentException) {
-            showStatus("Check the coordinates", failure.message ?: "Enter valid coordinates.")
+            showStatus("Check the coordinates", failure.message ?: "Enter valid coordinates.", chip = "INVALID POINT")
             return
         }
         val nameInput = EditText(this).apply { hint = "Place name"; setText(addressInput.text.toString().trim()) }
@@ -1586,11 +1925,13 @@ class MainActivity : Activity() {
         suppressMapSync = false
         updateMockPin(place.point, moveCamera = true)
         refreshSavedPlacesStrip()
-        showStatus("Location selected", place.name)
+        showStatus("Location selected", place.name, chip = "TARGET SET")
     }
 
     private fun readFavorites(): List<SavedPlace> {
-        val array = JSONArray(getPreferences(Context.MODE_PRIVATE).getString(KEY_FAVORITES, "[]"))
+        val array = runCatching {
+            JSONArray(getPreferences(Context.MODE_PRIVATE).getString(KEY_FAVORITES, "[]"))
+        }.getOrElse { JSONArray() }
         return (0 until array.length()).mapNotNull { index ->
             try {
                 val item = array.getJSONObject(index)
@@ -1614,7 +1955,7 @@ class MainActivity : Activity() {
         val point = try {
             GeoPoint.parse(latitudeInput.text.toString(), longitudeInput.text.toString())
         } catch (failure: IllegalArgumentException) {
-            showStatus("Check the coordinates", failure.message ?: "Enter valid coordinates.")
+            showStatus("Check the coordinates", failure.message ?: "Enter valid coordinates.", chip = "INVALID POINT")
             return
         }
         val label = Uri.encode(addressInput.text.toString().trim().ifEmpty { "Selected location" })
@@ -1629,12 +1970,22 @@ class MainActivity : Activity() {
         if (!::statusView.isInitialized) return
         updateRealLocationLegend()
         val prefs = getSharedPreferences(MockLocationService.PREFS, Context.MODE_PRIVATE)
-        when (prefs.getString(MockLocationService.KEY_STATE, "stopped")) {
-            "active" -> {
-                setSpoofButton("active")
+        when (prefs.getString(MockLocationService.KEY_STATE, MockLocationService.STATE_STOPPED)) {
+            MockLocationService.STATE_ACTIVE -> {
+                val remaining = prefs.getFloat(MockLocationService.KEY_REMAINING_METERS, -1f)
+                val driving = prefs.getBoolean(MockLocationService.KEY_SIMULATING, false)
+                val arrived = prefs.getBoolean(MockLocationService.KEY_ARRIVED, false)
+                if (driving) renderDriveProgress(prefs) else hideDriveHud()
+                setSpoofButton(if (driving) "driving" else "active")
                 if (::mapStatusChip.isInitialized) {
-                    mapStatusChip.text = if (realLocation == null) "MOCK · NO REAL FIX" else "MOCK · REAL PIN ${shortRealFixAge()}"
+                    mapStatusChip.text = when {
+                        driving && arrived -> "ARRIVED"
+                        driving && remaining >= 0f -> "DRIVING · ${formatRouteDistance(remaining.toDouble())} LEFT"
+                        realLocation == null -> "MOCK · NO REAL FIX"
+                        else -> "MOCK · REAL PIN ${shortRealFixAge()}"
+                    }
                     mapStatusChip.contentDescription = realLocationSnapshotDetail()
+                    mapStatusChip.setTextColor(if (driving) UiPalette.target else UiPalette.primaryDeep)
                 }
                 statusView.setText(R.string.status_mock_fix_title)
                 val timestamp = prefs.getLong(MockLocationService.KEY_UPDATED, 0L)
@@ -1647,25 +1998,41 @@ class MainActivity : Activity() {
                 statusDetailView.text = "$mockDetail\n${realLocationSnapshotDetail()}"
                 statusView.setTextColor(UiPalette.primaryDeep)
             }
-            "error" -> {
+            MockLocationService.STATE_PAUSED -> {
+                setSpoofButton("starting")
+                hideDriveHud()
+                if (::mapStatusChip.isInitialized) {
+                    mapStatusChip.text = "PAUSED · REAL FIX"
+                    mapStatusChip.setTextColor(UiPalette.warning)
+                }
+                statusView.text = "Mock providers paused"
+                statusDetailView.text = prefs.getString(MockLocationService.KEY_DETAIL, "Reading a real fix.")
+                statusView.setTextColor(UiPalette.warning)
+            }
+            MockLocationService.STATE_ERROR -> {
                 setSpoofButton("stopped")
-                if (::mapStatusChip.isInitialized) mapStatusChip.text = "SETUP NEEDED"
+                hideDriveHud()
+                if (::mapStatusChip.isInitialized) {
+                    mapStatusChip.text = "SETUP NEEDED"
+                    mapStatusChip.setTextColor(UiPalette.error)
+                }
                 statusView.setText(R.string.status_mock_location_failed)
                 statusDetailView.text = prefs.getString(MockLocationService.KEY_DETAIL, "Check Developer options and permissions.")
                 statusView.setTextColor(UiPalette.error)
                 if (detailsGroup.visibility != View.VISIBLE) toggleDetails()
             }
-            "starting" -> {
+            MockLocationService.STATE_STARTING -> {
                 setSpoofButton("starting")
                 if (::mapStatusChip.isInitialized) mapStatusChip.text = "STARTING…"
                 showStatus("Starting…", prefs.getString(MockLocationService.KEY_DETAIL, "Setting up providers.") ?: "Setting up providers.")
             }
             else -> {
+                hideDriveHud()
                 val ready = isSelectedMockApp()
                 if (pendingStartForFreshFix) {
                     setSpoofButton("starting")
-                    statusView.text = "Waiting for your real fix"
-                    statusDetailView.text = "Mock mode has not started. Waiting for a fresh, non-mock location for the blue marker."
+                    statusView.text = "Finding your real location"
+                    statusDetailView.text = "Saving a non-mock fix for the blue marker. Spoofing starts in a few seconds whether or not it arrives."
                     statusView.setTextColor(UiPalette.warning)
                     if (::mapStatusChip.isInitialized) mapStatusChip.text = "SAVING REAL FIX…"
                 } else {
@@ -1676,6 +2043,7 @@ class MainActivity : Activity() {
                             realLocation != null -> "LAST REAL FIX"
                             else -> "LOCATION NEEDED"
                         }
+                        mapStatusChip.setTextColor(if (realLocation != null) UiPalette.ink else UiPalette.warning)
                     }
                     statusView.text = if (ready) "Ready to start" else "Setup needed"
                     statusDetailView.text = if (ready) "Choose a place, then tap Start spoofing." else "Select GeoShift in Developer options to enable Android mock providers."
@@ -1687,17 +2055,100 @@ class MainActivity : Activity() {
         if (resumed) handler.postDelayed(statusPoll, 1_000L)
     }
 
+    private fun setFollowDrive(follow: Boolean) {
+        followDrive = follow
+        if (!::driveFollowChip.isInitialized) return
+        driveFollowChip.text = if (follow) "Following" else "Follow"
+        driveFollowChip.contentDescription =
+            if (follow) "The map follows the trip. Tap to stop following." else "The map stays where you put it. Tap to follow the trip."
+        if (follow) lastDrivePoint?.let { point ->
+            map?.animateCamera(CameraUpdateFactory.newLatLngZoom(LatLng(point.latitude, point.longitude), DRIVE_FOLLOW_ZOOM), 600)
+        }
+    }
+
+    private fun refreshDriveControls() {
+        if (!::travelButton.isInitialized) return
+        val driving = driveHud.visibility == View.VISIBLE
+        val hasRoute = currentRoute != null
+        travelButton.visibility = if (hasRoute && !driving) View.VISIBLE else View.GONE
+        travelButton.text = if (hasRoute) "Travel to destination" else "Plan a route"
+    }
+
+    /** Mirrors the running simulation onto the map and the HUD once per second. */
+    private fun renderDriveProgress(prefs: android.content.SharedPreferences) {
+        val total = prefs.getFloat(MockLocationService.KEY_TOTAL_METERS, -1f)
+        val remaining = prefs.getFloat(MockLocationService.KEY_REMAINING_METERS, -1f)
+        val arrived = prefs.getBoolean(MockLocationService.KEY_ARRIVED, false)
+        val speedKph = prefs.getFloat(MockLocationService.KEY_SPEED_KPH, 0f)
+        val bearing = prefs.getFloat(MockLocationService.KEY_BEARING, 0f)
+        val point = runCatching {
+            GeoPoint.parse(
+                prefs.getString(MockLocationService.KEY_CURRENT_LAT, null) ?: return,
+                prefs.getString(MockLocationService.KEY_CURRENT_LON, null) ?: return
+            )
+        }.getOrNull() ?: return
+
+        val previous = lastDrivePoint
+        lastDrivePoint = point
+        updateMockPin(point, animate = false)
+        updateHeadingMarker(point, bearing)
+        if (remaining >= 0f) updateTravelledRoute(remaining.toDouble())
+        val movedMeters = previous?.let { RouteSimulator.metersBetween(it, point) } ?: Double.MAX_VALUE
+        if (followDrive && movedMeters > 1.0) map?.animateCamera(
+            CameraUpdateFactory.newLatLngZoom(LatLng(point.latitude, point.longitude), DRIVE_FOLLOW_ZOOM),
+            900
+        )
+
+        if (!::driveHud.isInitialized) return
+        driveHud.visibility = View.VISIBLE
+        val etaSeconds = if (speedKph > 0f && remaining > 0f) remaining / (speedKph / 3.6f) else 0f
+        driveHeadline.text = when {
+            arrived -> "Arrived"
+            remaining >= 0f -> "${formatRouteDistance(remaining.toDouble())} left · ${formatRouteDuration(etaSeconds.toDouble())}"
+            else -> "Travelling"
+        }
+        driveSubline.text = if (arrived) {
+            "Holding ${formatCoordinate(point.latitude)}, ${formatCoordinate(point.longitude)}. Apps keep reporting the destination."
+        } else {
+            "${speedKph.toInt()} km/h · heading ${bearing.toInt()}° · apps see only this trip"
+        }
+        val fraction = if (total > 0f && remaining >= 0f) ((total - remaining) / total).coerceIn(0f, 1f) else 0f
+        driveHud.post {
+            val trackWidth = (driveProgressFill.parent as? View)?.width ?: return@post
+            driveProgressFill.layoutParams = driveProgressFill.layoutParams.apply {
+                width = (trackWidth * fraction).toInt().coerceAtLeast(if (fraction > 0f) dp(6) else 0)
+            }
+            driveProgressFill.requestLayout()
+        }
+        refreshDriveControls()
+    }
+
+    private fun hideDriveHud() {
+        val hudShown = ::driveHud.isInitialized && driveHud.visibility == View.VISIBLE
+        if (!hudShown && lastDrivePoint == null) {
+            refreshDriveControls()
+            return
+        }
+        lastDrivePoint = null
+        if (::driveHud.isInitialized && driveHud.visibility != View.GONE) driveHud.visibility = View.GONE
+        updateHeadingMarker(null, 0f)
+        travelledSource?.setGeoJson(FeatureCollection.fromFeatures(emptyArray()))
+        refreshDriveControls()
+    }
+
     private fun toggleSpoofing() {
         if (pendingStartForFreshFix) {
             pendingStartForFreshFix = false
+            startedWithoutRealFix = false
+            handler.removeCallbacks(startAnywayAfterLookup)
             stopCurrentLocationUpdates()
             setSpoofButton("stopped")
-            showStatus("Start canceled", "The real-location lookup stopped before mock mode began.")
+            showStatus("Start canceled", "The real-location lookup stopped before mock mode began.", chip = "CANCELED")
             return
         }
         val state = getSharedPreferences(MockLocationService.PREFS, Context.MODE_PRIVATE)
-            .getString(MockLocationService.KEY_STATE, "stopped")
-        if (state == "active" || state == "starting") stopSession() else startSession()
+            .getString(MockLocationService.KEY_STATE, MockLocationService.STATE_STOPPED)
+        if (state in RUNNING_STATES) stopSession() else startSession()
     }
 
     private fun setSpoofButton(state: String) {
@@ -1707,6 +2158,13 @@ class MainActivity : Activity() {
         when (state) {
             "active" -> {
                 startButton.text = "Stop spoofing"
+                setButtonIcon(R.drawable.ic_stop)
+                startButton.contentDescription = "Stop spoofing"
+                startButton.background = buttonGradient(0xFFA93F43.toInt(), 0xFFD65F55.toInt())
+                animateButtonState()
+            }
+            "driving" -> {
+                startButton.text = "Stop travelling"
                 setButtonIcon(R.drawable.ic_stop)
                 startButton.contentDescription = "Stop spoofing"
                 startButton.background = buttonGradient(0xFFA93F43.toInt(), 0xFFD65F55.toInt())
@@ -1735,42 +2193,28 @@ class MainActivity : Activity() {
         startButton.animate().scaleX(1f).scaleY(1f).setDuration(220L).start()
     }
 
-    private fun showStatus(title: String, detail: String) {
+    /**
+     * Single place that updates the sheet status and the map chip. The chip label is passed in
+     * rather than derived from the title, so renaming a message cannot silently break the chip.
+     */
+    private fun showStatus(title: String, detail: String, chip: String? = null) {
         if (!::statusView.isInitialized) return
         statusView.text = title
         statusView.setTextColor(UiPalette.ink)
         statusDetailView.text = detail
         if (::mapStatusChip.isInitialized) {
-            mapStatusChip.text = when (title) {
-                "Finding your location…" -> "Locating…"
-                "Waiting for your real fix…" -> "SAVING REAL FIX…"
-                "You are here", "Current location found" -> "REAL FIX READY"
-                "Showing last real fix" -> "LAST REAL FIX"
-                "Location not found", "Turn on Location" -> "LOCATION NEEDED"
-                "Location permission is needed" -> "ALLOW LOCATION"
-                "Select GeoShift as the mock app" -> "SELECT MOCK APP"
-                "Could not start" -> "START FAILED"
-                "Real fix unavailable" -> "NO FRESH FIX"
-                "Check the coordinates" -> "INVALID POINT"
-                "Map point selected", "Location selected", "Home loaded" -> "TARGET SET"
-                "Searching…" -> "SEARCHING…"
-                "Starting…" -> "STARTING…"
-                "Finding directions…" -> "ROUTE SEARCH…"
-                "Route ready" -> "ROUTE READY"
-                else -> title.uppercase(Locale.getDefault()).take(20)
-            }
+            mapStatusChip.text = chip ?: title.uppercase(Locale.getDefault()).take(22)
+            mapStatusChip.setTextColor(UiPalette.ink)
             mapStatusChip.contentDescription = "$title. Tap location status to see details."
         }
         val setupFailure = title in setOf(
             "Location permission is needed", "Select GeoShift as the mock app", "Could not start",
-            "Real fix unavailable", "Could not find location", "Location not found", "Turn on Location"
+            "Could not find location", "Location not found", "Turn on Location", "Choose a spoof point"
         )
         if (setupFailure && ::detailsGroup.isInitialized && detailsGroup.visibility != View.VISIBLE) {
             toggleDetails()
         }
     }
-
-    private fun horizontal() = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
 
     private fun actionChip(label: String, backgroundColor: Int, foregroundColor: Int, iconResource: Int? = null, onClick: () -> Unit) = TextView(this).apply {
         text = label
@@ -1839,26 +2283,20 @@ class MainActivity : Activity() {
         hint = hintText
         textSize = 15f
         setSingleLine(true)
-        inputType = if (signedDecimal) android.text.InputType.TYPE_CLASS_NUMBER or android.text.InputType.TYPE_NUMBER_FLAG_DECIMAL or android.text.InputType.TYPE_NUMBER_FLAG_SIGNED
-        else android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+        if (signedDecimal) {
+            inputType = android.text.InputType.TYPE_CLASS_NUMBER or
+                android.text.InputType.TYPE_NUMBER_FLAG_DECIMAL or
+                android.text.InputType.TYPE_NUMBER_FLAG_SIGNED
+            // Several IMEs omit the minus key for numberSigned, which makes southern and western
+            // coordinates impossible to type. A digits key listener accepts it on any keyboard.
+            keyListener = android.text.method.DigitsKeyListener.getInstance(Locale.US, true, true)
+        } else {
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+        }
         setPadding(dp(12), dp(10), dp(12), dp(10))
         setTextColor(UiPalette.ink)
         setHintTextColor(UiPalette.muted)
         background = rounded(UiPalette.surfaceRaised, 13, UiPalette.outline)
-    }
-
-    private fun button(label: String, onClick: () -> Unit) = Button(this).apply {
-        text = label
-        isAllCaps = false
-        minHeight = dp(46)
-        textSize = 14f
-        setTextColor(UiPalette.ink)
-        background = rounded(UiPalette.surfaceRaised, 14, UiPalette.outline)
-        setOnClickListener { onClick() }
-    }
-
-    private fun weightParams(start: Int = 0) = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
-        if (start > 0) marginStart = dp(start)
     }
 
     private fun margin(top: Int = 0, bottom: Int = 0, start: Int = 0) = LinearLayout.LayoutParams(
@@ -1907,9 +2345,7 @@ class MainActivity : Activity() {
         }
         readFavorites().forEach { items += false to it }
         if (::savedPlacesTitle.isInitialized) savedPlacesTitle.text = "SAVED PLACES  ·  ${items.size}"
-        val selectedPoint = if (::latitudeInput.isInitialized && ::longitudeInput.isInitialized) {
-            runCatching { GeoPoint.parse(latitudeInput.text.toString(), longitudeInput.text.toString()) }.getOrNull()
-        } else null
+        val selectedPoint = selectedSpoofPoint()
         if (items.isEmpty()) {
             placesStrip.addView(text("Choose a point, then tap + Save place", 12f, UiPalette.muted).apply {
                 gravity = Gravity.CENTER_VERTICAL
@@ -2001,6 +2437,16 @@ class MainActivity : Activity() {
     }
 
     private data class SavedPlace(val name: String, val point: GeoPoint)
+
+    /** A route handed to the service so the mock fix walks it instead of standing still. */
+    private data class DrivePlan(val points: List<GeoPoint>, val speedKph: Double) {
+        fun flatCoordinates() = DoubleArray(points.size * 2).also { out ->
+            points.forEachIndexed { index, point ->
+                out[index * 2] = point.latitude
+                out[index * 2 + 1] = point.longitude
+            }
+        }
+    }
     private data class PlaceSuggestion(val label: String, val point: GeoPoint) {
         override fun toString() = label
     }
@@ -2028,7 +2474,23 @@ class MainActivity : Activity() {
         private const val SOURCE_MOCK = "mock-location-source"
         private const val SOURCE_ROUTE = "directions-route-source"
         private const val SOURCE_DESTINATION = "route-destination-source"
-    private const val MOCK_ICON = "mock-location-pin"
+        private const val SOURCE_ACCURACY = "real-accuracy-source"
+        private const val SOURCE_TRAVELLED = "directions-travelled-source"
+        private const val SOURCE_VEHICLE = "drive-heading-source"
+        private const val MOCK_ICON = "mock-location-pin"
+        private const val VEHICLE_ICON = "drive-heading-marker"
+        private const val FEATURE_BEARING = "bearing"
         private const val CURRENT_LOCATION_TIMEOUT_MS = 20_000L
+        private const val START_ANYWAY_DELAY_MS = 8_000L
+        private const val DRIVE_FOLLOW_ZOOM = 16.5
+        private val RUNNING_STATES = setOf(
+            MockLocationService.STATE_ACTIVE,
+            MockLocationService.STATE_STARTING,
+            MockLocationService.STATE_PAUSED
+        )
+        private const val ORIGIN_SPOOF_POINT = "Spoof point"
+        private const val ORIGIN_MY_LOCATION = "My location"
+        private val DRIVE_SPEED_LABELS = arrayOf("Walking · 5 km/h", "City driving · 40 km/h", "Highway · 100 km/h")
+        private val DRIVE_SPEEDS_KPH = doubleArrayOf(5.0, 40.0, 100.0)
     }
 }

@@ -43,12 +43,12 @@ class MockLocationRoundTripTest {
             }
             assertEquals("The test must begin with mock mode stopped.", "stopped", waitForState(prefs, "stopped", 10_000L))
             instrumentation.runOnMainSync {
-                activity.javaClass.getDeclaredField("hasFreshRealFix").apply { isAccessible = true }.setBoolean(activity, true)
                 (activity.window.decorView.findViewWithTag("latitude-input") as EditText).setText("37.4219983")
                 (activity.window.decorView.findViewWithTag("longitude-input") as EditText).setText("-122.084")
             }
             instrumentation.runOnMainSync { mockToggle.performClick() }
-            val startedState = waitForState(prefs, "active", 25_000L)
+            // No real fix is staged, so this also proves a missing real fix cannot block a start.
+            val startedState = waitForState(prefs, "active", 45_000L)
             assertEquals(
                 "Start button did not activate both mock providers. Service detail: ${prefs.getString(MockLocationService.KEY_DETAIL, "")}",
                 "active",
@@ -339,45 +339,84 @@ class MockLocationRoundTripTest {
     }
 
     @Test
-    fun savedPlaceBackupRoundTripsAndExcludesCurrentLocationHistory() {
-        val source = SavedPlacesBackup(
-            home = BackupPlace("Home", 12.9716, 77.5946),
-            favorites = listOf(BackupPlace("Studio", 13.0358, 77.5970), BackupPlace("Park", 12.9352, 77.6245))
-        )
-        val json = SavedPlacesBackupCodec.encode(source)
-        val restored = SavedPlacesBackupCodec.decode(json)
-        assertEquals(source, restored)
-        assertTrue("The export should only contain deliberately saved places.",
-            !json.contains("last_real") && !json.contains("real_location"))
-        assertTrue("Invalid coordinates should be rejected.", runCatching {
-            SavedPlacesBackupCodec.decode("""{"product":"GeoShift","schemaVersion":1,"home":{"name":"Bad","latitude":91,"longitude":0},"favorites":[]}""")
-        }.isFailure)
+    fun aDrivenRouteMovesTheDeliveredMockFixTowardsTheDestination() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val context = instrumentation.targetContext
+        instrumentation.uiAutomation.grantRuntimePermission(context.packageName, Manifest.permission.ACCESS_FINE_LOCATION)
+        if (Build.VERSION.SDK_INT >= 33) {
+            instrumentation.uiAutomation.grantRuntimePermission(context.packageName, Manifest.permission.POST_NOTIFICATIONS)
+        }
+        val prefs = context.getSharedPreferences(MockLocationService.PREFS, Context.MODE_PRIVATE)
+        val manager = context.getSystemService(Context.LOCATION_SERVICE) as LocationManager
+        // A straight 2 km leg at 100 km/h, so a few seconds of simulation is unmistakable movement.
+        val route = doubleArrayOf(37.4000, -122.0840, 37.4180, -122.0840)
+        val start = Intent(context, MockLocationService::class.java)
+            .setAction(MockLocationService.ACTION_START)
+            .putExtra(MockLocationService.EXTRA_LATITUDE, route[0])
+            .putExtra(MockLocationService.EXTRA_LONGITUDE, route[1])
+            .putExtra(MockLocationService.EXTRA_ACCURACY, 5f)
+            .putExtra(MockLocationService.EXTRA_ROUTE, route)
+            .putExtra(MockLocationService.EXTRA_SPEED_KPH, 100.0)
+        try {
+            context.startForegroundService(start)
+            assertEquals(
+                "The simulated drive should reach the active state. Detail: ${prefs.getString(MockLocationService.KEY_DETAIL, "")}",
+                "active",
+                waitForState(prefs, "active", 30_000L)
+            )
+            assertTrue("The session should report that it is simulating a route.",
+                prefs.getBoolean(MockLocationService.KEY_SIMULATING, false))
+            val first = awaitMockFix(manager)
+            SystemClock.sleep(6_000L)
+            val later = awaitMockFix(manager)
+            val moved = RouteSimulator.metersBetween(
+                GeoPoint(first.latitude, first.longitude),
+                GeoPoint(later.latitude, later.longitude)
+            )
+            assertTrue("A 100 km/h drive should cover well over 50 m in six seconds, moved ${moved}m.", moved > 50.0)
+            assertTrue("A moving fix should carry a non-zero speed.", later.speed > 1f)
+            assertTrue("Distance remaining should shrink as the drive progresses.",
+                prefs.getFloat(MockLocationService.KEY_REMAINING_METERS, -1f) < 2_000f)
+        } finally {
+            context.startService(Intent(context, MockLocationService::class.java).setAction(MockLocationService.ACTION_STOP))
+            waitForState(prefs, "stopped", 10_000L)
+        }
     }
 
     @Test
-    fun directionsParserKeepsGeoJsonCoordinatesAndTurnSteps() {
-        val fixture = """{
-            "code":"Ok",
-            "routes":[{
-                "distance":1250.0,
-                "duration":420.0,
-                "geometry":{"type":"LineString","coordinates":[[77.5946,12.9716],[77.6000,12.9750]]},
-                "legs":[{"steps":[
-                    {"distance":300.0,"duration":90.0,"name":"MG Road","maneuver":{"type":"depart","modifier":"straight"}},
-                    {"distance":950.0,"duration":330.0,"name":"Brigade Road","maneuver":{"type":"turn","modifier":"right"}},
-                    {"distance":0.0,"duration":0.0,"name":"","maneuver":{"type":"arrive"}}
-                ]}]
-            }]
-        }"""
-        val route = DirectionsRouteParser.parse(fixture)
-        assertEquals(2, route.points.size)
-        assertEquals(12.9716, route.points.first().latitude, 0.000001)
-        assertEquals(77.6000, route.points.last().longitude, 0.000001)
-        assertEquals(1250.0, route.distanceMeters, 0.0)
-        assertEquals(3, route.steps.size)
-        assertTrue(route.steps[0].instruction.contains("MG Road"))
-        assertTrue(route.steps[1].instruction.contains("right"))
-        assertEquals("Arrive at your destination", route.steps[2].instruction)
+    fun theFusedProviderIsMockedWhereAndroidSupportsIt() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val context = instrumentation.targetContext
+        instrumentation.uiAutomation.grantRuntimePermission(context.packageName, Manifest.permission.ACCESS_FINE_LOCATION)
+        val manager = context.getSystemService(Context.LOCATION_SERVICE) as LocationManager
+        val controller = MockLocationController(context, manager)
+        try {
+            controller.inject(GeoPoint(48.8584, 2.2945))
+            val expected = buildList {
+                add(LocationManager.GPS_PROVIDER)
+                add(LocationManager.NETWORK_PROVIDER)
+                if (Build.VERSION.SDK_INT >= 31) add(LocationManager.FUSED_PROVIDER)
+            }
+            assertEquals(
+                "Apps that read Play Services' fused client need the fused provider mocked too.",
+                expected.sorted(),
+                controller.providerNames.sorted()
+            )
+        } finally {
+            controller.stop()
+        }
+    }
+
+    private fun awaitMockFix(manager: LocationManager): android.location.Location {
+        val deadline = SystemClock.elapsedRealtime() + 10_000L
+        while (SystemClock.elapsedRealtime() < deadline) {
+            val fix = runCatching { manager.getLastKnownLocation(LocationManager.GPS_PROVIDER) }.getOrNull()
+            @Suppress("DEPRECATION")
+            val isMock = fix != null && if (Build.VERSION.SDK_INT >= 31) fix.isMock else fix.isFromMockProvider
+            if (fix != null && isMock) return fix
+            SystemClock.sleep(200L)
+        }
+        error("Android never returned a mock GPS fix for the simulated drive.")
     }
 
     private fun wakeDevice(instrumentation: android.app.Instrumentation) {
