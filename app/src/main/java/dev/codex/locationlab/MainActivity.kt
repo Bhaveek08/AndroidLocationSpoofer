@@ -254,6 +254,7 @@ class MainActivity : Activity() {
         handler.removeCallbacks(debouncedMapSync)
         handler.removeCallbacks(currentLocationTimeout)
         handler.removeCallbacks(startAnywayAfterLookup)
+        suggestionTask?.let(handler::removeCallbacks)
         stopCurrentLocationUpdates()
         if (resamplingRealFix) finishRealFixResample("Mock providers restored", "The real-location refresh ended when GeoShift closed.")
         routeClient.dispatcher.cancelAll()
@@ -922,6 +923,20 @@ class MainActivity : Activity() {
         longitudeInput.addTextChangedListener(watcher)
     }
 
+    /**
+     * Geocoding runs on an executor that onDestroy shuts down. A debounced suggestion task can fire
+     * after that, and submitting to a terminated executor throws on the main thread, so every
+     * submission goes through here.
+     */
+    private fun runGeocoder(block: () -> Unit) {
+        if (isFinishing || geocoderExecutor.isShutdown) return
+        try {
+            geocoderExecutor.execute(block)
+        } catch (_: java.util.concurrent.RejectedExecutionException) {
+            // The activity was destroyed between the check and the submission.
+        }
+    }
+
     private fun colorDot(color: Int) = View(this).apply { background = rounded(color, 50) }
 
     private fun syncMapToFields() {
@@ -1338,7 +1353,7 @@ class MainActivity : Activity() {
             return
         }
         showStatus("Searching…", "Looking up “$query”.", chip = "SEARCHING…")
-        geocoderExecutor.execute {
+        runGeocoder {
             try {
                 @Suppress("DEPRECATION")
                 val results = Geocoder(this, Locale.getDefault()).getFromLocationName(query, 6).orEmpty()
@@ -1365,7 +1380,7 @@ class MainActivity : Activity() {
             return
         }
         val task = Runnable {
-            geocoderExecutor.execute {
+            runGeocoder {
                 val results = runCatching {
                     @Suppress("DEPRECATION")
                     Geocoder(this, Locale.getDefault()).getFromLocationName(normalized, 5).orEmpty()
@@ -1532,7 +1547,7 @@ class MainActivity : Activity() {
         activeRouteCall?.cancel()
         val requestId = ++routeLookupGeneration
         showStatus("Finding directions…", "Resolving both locations and requesting an in-app route.", chip = "ROUTE SEARCH…")
-        geocoderExecutor.execute {
+        runGeocoder {
             val resolved = runCatching {
                 resolveRoutePoint(originQuery, allowMyLocation = true) to
                     resolveRoutePoint(destinationQuery, allowMyLocation = false)

@@ -348,6 +348,10 @@ class MockLocationRoundTripTest {
         }
         val prefs = context.getSharedPreferences(MockLocationService.PREFS, Context.MODE_PRIVATE)
         val manager = context.getSystemService(Context.LOCATION_SERVICE) as LocationManager
+        // Android 12+ refuses a foreground-service start from the background, so bring the app up first.
+        val launcher = context.packageManager.getLaunchIntentForPackage(context.packageName)
+            ?: error("GeoShift launcher activity was not found.")
+        val activity = instrumentation.startActivitySync(launcher.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
         // A straight 2 km leg at 100 km/h, so a few seconds of simulation is unmistakable movement.
         val route = doubleArrayOf(37.4000, -122.0840, 37.4180, -122.0840)
         val start = Intent(context, MockLocationService::class.java)
@@ -380,6 +384,7 @@ class MockLocationRoundTripTest {
         } finally {
             context.startService(Intent(context, MockLocationService::class.java).setAction(MockLocationService.ACTION_STOP))
             waitForState(prefs, "stopped", 10_000L)
+            instrumentation.runOnMainSync { activity.finish() }
         }
     }
 
@@ -450,15 +455,26 @@ class MockLocationRoundTripTest {
         val manager = context.getSystemService(Context.LOCATION_SERVICE) as LocationManager
         val target = GeoPoint(37.4219983, -122.084)
         val received = CountDownLatch(1)
-        var confirmedProviders = emptySet<String>()
-        val controller = MockLocationController(context, manager) { _, providers ->
-            confirmedProviders = providers
-            received.countDown()
-        }
+        val controller = MockLocationController(context, manager) { _, _ -> received.countDown() }
         try {
             controller.inject(target, 15f)
-            assertTrue("Android should deliver the mock fix to both providers.", received.await(15, TimeUnit.SECONDS))
-            assertEquals(setOf(LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER), confirmedProviders)
+            assertTrue("Android should confirm at least one mock provider.", received.await(15, TimeUnit.SECONDS))
+            // gps and network must both confirm. Each confirmation is reported once, so poll the
+            // accumulated set rather than reading whatever the latest callback happened to carry.
+            val required = setOf(LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER)
+            val deadline = SystemClock.elapsedRealtime() + 15_000L
+            while (SystemClock.elapsedRealtime() < deadline && !controller.confirmedProviderNames.containsAll(required)) {
+                controller.inject(target, 15f)
+                SystemClock.sleep(500L)
+            }
+            assertTrue(
+                "Android should deliver the mock fix to gps and network; confirmed ${controller.confirmedProviderNames}.",
+                controller.confirmedProviderNames.containsAll(required)
+            )
+            val delivered = manager.getLastKnownLocation(LocationManager.GPS_PROVIDER)
+                ?: error("Android returned no gps fix after injection.")
+            assertEquals(target.latitude, delivered.latitude, 0.000001)
+            assertEquals(target.longitude, delivered.longitude, 0.000001)
         } finally {
             controller.stop()
             instrumentation.runOnMainSync { activity.finish() }
@@ -491,10 +507,17 @@ class MockLocationRoundTripTest {
                 "active",
                 startedState
             )
-            val firstUpdate = prefs.getLong(MockLocationService.KEY_UPDATED, 0L)
-            assertTrue("The service should record an Android readback timestamp.", firstUpdate > 0L)
+            assertTrue(
+                "The service should record an Android readback timestamp.",
+                prefs.getLong(MockLocationService.KEY_UPDATED, 0L) > 0L
+            )
+            val manager = context.getSystemService(Context.LOCATION_SERVICE) as LocationManager
+            val firstFixTime = awaitMockFix(manager).time
             Thread.sleep(6_000L)
-            assertTrue("The foreground service should refresh the fix while running.", prefs.getLong(MockLocationService.KEY_UPDATED, 0L) > firstUpdate)
+            assertTrue(
+                "The foreground service should keep injecting, so Android's latest fix must be newer.",
+                awaitMockFix(manager).time > firstFixTime
+            )
 
             val stop = Intent(context, MockLocationService::class.java).setAction(MockLocationService.ACTION_STOP)
             instrumentation.runOnMainSync { activity.startService(stop) }

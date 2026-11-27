@@ -37,12 +37,16 @@ class MockLocationController(
     private val lock = Any()
     private var targetPoint: GeoPoint? = null
     private var targetTimeMillis = 0L
-    private val verifiedProviders = mutableSetOf<String>()
-    private var reportedPoint: GeoPoint? = null
-    private var reportedProviders = emptySet<String>()
+
+    /** Providers confirmed since the session started. Reset only by [stop], never per injection. */
+    private val sessionConfirmed = mutableSetOf<String>()
+    private var lastReportMillis = 0L
     private var registered = false
 
     val providerNames: List<String> get() = synchronized(lock) { activeProviders.toList() }
+
+    /** Providers Android has confirmed a mock fix for during this session. */
+    val confirmedProviderNames: Set<String> get() = synchronized(lock) { sessionConfirmed.toSet() }
 
     fun inject(
         point: GeoPoint,
@@ -60,7 +64,6 @@ class MockLocationController(
         synchronized(lock) {
             targetPoint = point
             targetTimeMillis = injectionTime
-            verifiedProviders.clear()
         }
         val providers = synchronized(lock) { activeProviders.toList() }
         if (providers.isEmpty()) throw IllegalStateException("Android did not accept any mock location provider.")
@@ -122,9 +125,8 @@ class MockLocationController(
         synchronized(lock) {
             activeProviders.clear()
             targetPoint = null
-            verifiedProviders.clear()
-            reportedPoint = null
-            reportedProviders = emptySet()
+            sessionConfirmed.clear()
+            lastReportMillis = 0L
         }
         registered = false
     }
@@ -190,16 +192,17 @@ class MockLocationController(
             kotlin.math.abs(location.longitude - expected.longitude) > COORDINATE_TOLERANCE
         ) return
 
-        // Report the first confirmation and every time another provider joins, but not on every
-        // 1 Hz refresh: the listener fires continuously and each report writes state to disk.
+        // The listener fires for every provider on every 1 Hz refresh, and each report writes state
+        // to disk. Report when a provider confirms for the first time, then only as an occasional
+        // liveness heartbeat.
         val report = synchronized(lock) {
             if (targetPoint != expected) return
-            verifiedProviders += provider
-            val changed = reportedProviders != verifiedProviders.toSet() || reportedPoint == null
-            if (!changed) return
-            reportedPoint = expected
-            reportedProviders = verifiedProviders.toSet()
-            expected to reportedProviders
+            val now = System.currentTimeMillis()
+            val isNewProvider = sessionConfirmed.add(provider)
+            val heartbeatDue = now - lastReportMillis >= HEARTBEAT_INTERVAL_MS
+            if (!isNewProvider && !heartbeatDue) return
+            lastReportMillis = now
+            expected to sessionConfirmed.toSet()
         }
         onVerified(report.first, report.second)
     }
@@ -238,6 +241,7 @@ class MockLocationController(
 
     companion object {
         private const val COORDINATE_TOLERANCE = 0.000001
+        private const val HEARTBEAT_INTERVAL_MS = 30_000L
         private const val DEFAULT_ALTITUDE_METERS = 15.0
     }
 }

@@ -70,7 +70,17 @@ jobs:
           arch: x86_64
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
           script: |
+            set -o pipefail
             ./gradlew installDebug installDebugAndroidTest
             adb shell cmd location set-location-enabled true
             adb shell appops set dev.codex.locationlab android:mock_location allow
-            adb shell am instrument -w -r dev.codex.locationlab.test/androidx.test.runner.AndroidJUnitRunner
+            adb shell am instrument -w -r dev.codex.locationlab.test/androidx.test.runner.AndroidJUnitRunner \
+              2>&1 | tee instrument.log
+            # `am instrument` exits 0 even when tests fail or the app process crashes, so the run
+            # is only a pass if the runner printed an OK summary and reported no failures.
+            if grep -qE 'FAILURES!!!|Process crashed|INSTRUMENTATION_STATUS_CODE: -[12]$' instrument.log \
+               || ! grep -qE 'OK \([0-9]+ tests?\)' instrument.log; then
+              echo "::error::Instrumentation tests failed; see the log below."
+              sed -n '/INSTRUMENTATION_RESULT/,$p' instrument.log
+              exit 1
+            fi
