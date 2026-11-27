@@ -54,7 +54,9 @@ class MockLocationRoundTripTest {
                 "active",
                 startedState
             )
-            assertEquals("Stop spoofing", mockToggle.contentDescription)
+            // The button follows the activity's one-second status poll, so the service reaching
+            // "active" does not mean the UI has caught up yet.
+            assertEquals("Stop spoofing", awaitContentDescription(mockToggle, "Stop spoofing", 5_000L))
             instrumentation.runOnMainSync { mockToggle.performClick() }
             assertEquals("The same button should stop the session.", "stopped", waitForState(prefs, "stopped", 10_000L))
         } finally {
@@ -84,7 +86,7 @@ class MockLocationRoundTripTest {
                 val root = ui.rootInActiveWindow
                 foundWarning = root?.let {
                     it.findAccessibilityNodeInfosByText("Privacy checkup").isNotEmpty() &&
-                        it.findAccessibilityNodeInfosByText("GeoShift changes Android mock GPS/network fixes only.").isNotEmpty()
+                        it.findAccessibilityNodeInfosByText("Apps can still detect a mock fix").isNotEmpty()
                 } == true
                 if (!foundWarning) SystemClock.sleep(100L)
             }
@@ -362,7 +364,7 @@ class MockLocationRoundTripTest {
             .putExtra(MockLocationService.EXTRA_ROUTE, route)
             .putExtra(MockLocationService.EXTRA_SPEED_KPH, 100.0)
         try {
-            context.startForegroundService(start)
+            instrumentation.runOnMainSync { activity.startForegroundService(start) }
             assertEquals(
                 "The simulated drive should reach the active state. Detail: ${prefs.getString(MockLocationService.KEY_DETAIL, "")}",
                 "active",
@@ -533,6 +535,14 @@ class MockLocationRoundTripTest {
                 activity.finish()
             }
         }
+    }
+
+    private fun awaitContentDescription(view: View, expected: String, timeoutMs: Long): String {
+        val deadline = SystemClock.elapsedRealtime() + timeoutMs
+        while (SystemClock.elapsedRealtime() < deadline && view.contentDescription?.toString() != expected) {
+            SystemClock.sleep(100L)
+        }
+        return view.contentDescription?.toString().orEmpty()
     }
 
     private fun waitForState(prefs: android.content.SharedPreferences, expected: String, timeoutMs: Long): String {

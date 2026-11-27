@@ -775,6 +775,14 @@ class MainActivity : Activity() {
         AlertDialog.Builder(this)
             .setTitle("Privacy checkup")
             .setMessage(message)
+            .setNeutralButton("Open settings…") { _, _ -> showPrivacySettingsShortcuts(settingsActions) }
+            .setPositiveButton("Done", null)
+            .show()
+    }
+
+    private fun showPrivacySettingsShortcuts(settingsActions: Array<String>) {
+        AlertDialog.Builder(this)
+            .setTitle("Location settings")
             .setItems(settingsActions) { _, which ->
                 when (which) {
                     0 -> openLocationSettings()
@@ -784,7 +792,7 @@ class MainActivity : Activity() {
                     4 -> forgetSavedRealLocation()
                 }
             }
-            .setPositiveButton("Done", null)
+            .setNegativeButton("Back", null)
             .show()
     }
 
@@ -1694,8 +1702,7 @@ class MainActivity : Activity() {
         }
         val labels = DRIVE_SPEED_LABELS
         AlertDialog.Builder(this)
-            .setTitle("Travel this route")
-            .setMessage("GeoShift will move your reported location along the route from its start to the destination. Apps see the whole trip; your real location is never sent.")
+            .setTitle("Travel at which speed?")
             .setItems(labels) { _, which ->
                 pendingDrive = DrivePlan(route.points, DRIVE_SPEEDS_KPH[which])
                 selectSpoofPoint(route.points.first())
@@ -2085,8 +2092,10 @@ class MainActivity : Activity() {
         if (!::travelButton.isInitialized) return
         val driving = driveHud.visibility == View.VISIBLE
         val hasRoute = currentRoute != null
-        travelButton.visibility = if (hasRoute && !driving) View.VISIBLE else View.GONE
-        travelButton.text = if (hasRoute) "Travel to destination" else "Plan a route"
+        // Always offered when not already travelling, so the feature is visible on a first launch
+        // instead of hiding behind the directions dialog.
+        travelButton.visibility = if (driving) View.GONE else View.VISIBLE
+        travelButton.text = if (hasRoute) "Travel to destination" else "Plan a route to travel"
     }
 
     /** Mirrors the running simulation onto the map and the HUD once per second. */
