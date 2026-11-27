@@ -185,8 +185,8 @@ class MockLocationRoundTripTest {
                     ?: error("The selected place card should remain visible after loading it.")
                 assertTrue("The selected saved place should be announced as selected.", selected.contentDescription.toString().contains("selected"))
             }
-            assertEquals("12.50000000", latitude.text.toString())
-            assertEquals("44.25000000", longitude.text.toString())
+            assertEquals("12.5", latitude.text.toString())
+            assertEquals("44.25", longitude.text.toString())
         } finally {
             instrumentation.runOnMainSync {
                 val prefs = activity.getPreferences(Context.MODE_PRIVATE)

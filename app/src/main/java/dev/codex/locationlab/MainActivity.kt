@@ -1140,7 +1140,7 @@ class MainActivity : Activity() {
             return
         }
         val sessionState = getSharedPreferences(MockLocationService.PREFS, Context.MODE_PRIVATE)
-            .getString(MockLocationService.KEY_STATE, "stopped")
+            .getString(MockLocationService.KEY_STATE, MockLocationService.STATE_STOPPED)
         if (!resamplingRealFix && (sessionState == MockLocationService.STATE_ACTIVE || sessionState == MockLocationService.STATE_STARTING)) {
             locationLookupActive = false
             offerRealFixResample()
@@ -2396,7 +2396,9 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun formatCoordinate(value: Double) = String.format(Locale.US, "%.8f", value)
+    /** Six decimals is about 0.1 m; trailing zeros only make the coordinate harder to read. */
+    private fun formatCoordinate(value: Double): String =
+        String.format(Locale.US, "%.6f", value).trimEnd('0').trimEnd('.').ifEmpty { "0" }
 
     private fun manageSavedPlace(isHome: Boolean, place: SavedPlace) {
         val actions = arrayOf("Rename", "Remove")
